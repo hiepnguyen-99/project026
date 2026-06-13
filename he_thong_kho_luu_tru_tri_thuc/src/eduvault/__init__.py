@@ -1,0 +1,2 @@
+"""EduVault MVP package."""
+

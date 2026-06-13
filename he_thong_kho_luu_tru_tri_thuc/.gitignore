@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+data/mvp/
+.env
+client_secret_*.json
+.env.example
+!frontend/.env.example

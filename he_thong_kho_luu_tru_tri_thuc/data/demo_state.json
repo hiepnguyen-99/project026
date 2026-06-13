@@ -1,0 +1,126 @@
+{
+  "documents": [
+    {
+      "id": "doc-7dba8736ca",
+      "title": "Nam Can Ngoc Hien",
+      "topic": "Khác",
+      "doc_type": "Tài liệu",
+      "author": "Nguyễn Minh Anh",
+      "owner_code": "GV001",
+      "visibility": "public",
+      "created_at": "2026-06-08T22:42:50.101621+00:00",
+      "version": 1,
+      "size": 1210,
+      "status": "Đã lập chỉ mục",
+      "content": "ID_3,NAME_3,TYPE_3,ID_2,NAME_2,ID_1,NAME_1,lat,lon\n2094,Đất Mới,Commune,157,Năm Căn,18,Cà Mau,8.767840862274284,104.92042737846918\n2095,Hàm Rồng,Commune,157,Năm Căn,18,Cà Mau,8.832525253295898,105.03942416060602\n2096,Hàng Vịnh,Commune,157,Năm Căn,18,Cà Mau,8.788095951080322,105.04548986071637\n2097,Hiệp Tùng,Commune,157,Năm Căn,18,Cà Mau,8.817696094512996,105.09769916137739\n2098,Năm Căn,Townlet,157,Năm Căn,18,Cà Mau,8.772730350494356,104.98684787982569\n2099,Tam Giang Đông,Commune,157,Năm Căn,18,Cà Mau,8.794942378997888,105.24438333984193\n2100,Tam Giang,Commune,157,Năm Căn,18,Cà Mau,8.804855346679716,105.15658615779658\n2101,Đất Mũi,Commune,158,Ngọc Hiển,18,Cà Mau,8.610080242156982,104.78489598325247\n2102,Tân Ân Tây,Commune,158,Ngọc Hiển,18,Cà Mau,8.64735984802249,105.05473287117918\n2103,Tân Ân,Commune,158,Ngọc Hiển,18,Cà Mau,8.715204238891658,105.03060812757198\n2104,Tam Giang Tây,Commune,158,Ngọc Hiển,18,Cà Mau,8.743454933166504,105.127548725147\n2105,Viên An Đông,Commune,158,Ngọc Hiển,18,Cà Mau,8.659485340118465,104.94911660200145\n2106,Viên An,Commune,158,Ngọc Hiển,18,Cà Mau,8.645595073700008,104.86227835060703\n",
+      "citations": "Nội dung tài liệu tải lên"
+    },
+    {
+      "id": "doc-de-cuong-ai",
+      "title": "Đề cương học phần Trí tuệ nhân tạo",
+      "doc_type": "Đề cương",
+      "topic": "Trí tuệ nhân tạo",
+      "author": "Nguyễn Minh Anh",
+      "owner_code": "GV001",
+      "visibility": "public",
+      "created_at": "2026-05-20T08:30:00+00:00",
+      "version": 3,
+      "size": 286720,
+      "status": "Đã lập chỉ mục",
+      "content": "Học phần Trí tuệ nhân tạo cung cấp kiến thức về tìm kiếm, biểu diễn tri thức, học máy và hệ chuyên gia. Hình thức đánh giá gồm quá trình 40% và thi cuối kỳ 60%.",
+      "citations": "Mục 4. Nội dung và đánh giá học phần"
+    },
+    {
+      "id": "doc-rag-guide",
+      "title": "Hướng dẫn xây dựng hệ thống RAG",
+      "doc_type": "Học liệu",
+      "topic": "Trí tuệ nhân tạo",
+      "author": "Trần Hoàng Nam",
+      "owner_code": "TBM01",
+      "visibility": "public",
+      "created_at": "2026-06-01T03:15:00+00:00",
+      "version": 2,
+      "size": 1183744,
+      "status": "Đã lập chỉ mục",
+      "content": "RAG kết hợp truy xuất tài liệu và mô hình ngôn ngữ. Pipeline gồm ingest, chunking, embedding, retrieval, kiểm tra quyền, sinh câu trả lời và trích dẫn nguồn.",
+      "citations": "Trang 7, sơ đồ RAG pipeline"
+    },
+    {
+      "id": "doc-exam-process",
+      "title": "Quy trình xây dựng đề thi cuối kỳ",
+      "doc_type": "Quy trình",
+      "topic": "Khảo thí",
+      "author": "Trần Hoàng Nam",
+      "owner_code": "TBM01",
+      "visibility": "private",
+      "created_at": "2026-04-12T10:00:00+00:00",
+      "version": 5,
+      "size": 430080,
+      "status": "Đã lập chỉ mục",
+      "content": "Quy trình xây dựng đề thi gồm lập ma trận, biên soạn câu hỏi, phản biện chéo, phê duyệt và bàn giao bảo mật cho bộ phận khảo thí.",
+      "citations": "Mục 2. Các bước thực hiện"
+    },
+    {
+      "id": "doc-handover",
+      "title": "Bộ tài liệu bàn giao học phần Lập trình Python",
+      "doc_type": "Học liệu",
+      "topic": "Lập trình",
+      "author": "Nguyễn Minh Anh",
+      "owner_code": "GV001",
+      "visibility": "public",
+      "created_at": "2026-06-06T02:20:00+00:00",
+      "version": 1,
+      "size": 2097152,
+      "status": "Đã lập chỉ mục",
+      "content": "Bộ tài liệu gồm đề cương, slide 12 tuần, bài thực hành, rubric đồ án và các lưu ý khi giảng dạy học phần Lập trình Python.",
+      "citations": "Danh mục tài liệu bàn giao"
+    }
+  ],
+  "access_requests": [],
+  "activity": [
+    {
+      "text": "Nam Can Ngoc Hien được tải lên và lập chỉ mục",
+      "time": "Vừa xong",
+      "kind": "document"
+    },
+    {
+      "text": "Đồng bộ Google Drive hoàn tất",
+      "time": "10 phút trước",
+      "kind": "backup"
+    },
+    {
+      "text": "Hướng dẫn xây dựng hệ thống RAG được cập nhật",
+      "time": "2 giờ trước",
+      "kind": "document"
+    },
+    {
+      "text": "Bộ tài liệu Python được bàn giao",
+      "time": "Hôm qua",
+      "kind": "transfer"
+    }
+  ],
+  "backup": {
+    "compliant": true,
+    "copies": 3,
+    "locations": 2,
+    "offsite": 1,
+    "last_run": "2026-06-09T01:00:00+00:00",
+    "providers": [
+      {
+        "name": "MinIO",
+        "status": "Đồng bộ",
+        "type": "Bản chính"
+      },
+      {
+        "name": "Google Drive",
+        "status": "Đồng bộ",
+        "type": "Ngoài hệ thống"
+      },
+      {
+        "name": "OneDrive",
+        "status": "Đồng bộ",
+        "type": "Ngoài hệ thống"
+      }
+    ]
+  }
+}
