@@ -1,0 +1,26 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: eduvault-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: eduvault
+      MYSQL_USER: eduvault
+      MYSQL_PASSWORD: change-me
+      MYSQL_ROOT_PASSWORD: change-root-me
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-allowed-packet=512M
+    ports:
+      - "3307:3306"
+    volumes:
+      - eduvault_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pchange-root-me"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  eduvault_mysql_data:
