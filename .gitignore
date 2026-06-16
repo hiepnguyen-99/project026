@@ -1,9 +1,19 @@
+# Environment
+.env
+.env.example
+# Python
 __pycache__/
 *.py[cod]
-*.log
+*$py.class
+venv/
+.venv
+build/
+*.egg-info/
 .pytest_cache/
-data/mvp/
-.env
-client_secret_*.json
-.env.example
-!frontend/.env.example
+.mypy_cache/
+
+# OS
+.DS_Store
+
+# AI logs — tracked structure, ignored content
+.ai-log/*.jsonl

@@ -1,21 +1,203 @@
 "use client";
-import { BookOpen, ChevronLeft, Download, FileText, Highlighter, Languages, MessageSquareText, Sparkles } from "lucide-react";
+
+import {
+  BookOpen,
+  ChevronLeft,
+  FileText,
+  Highlighter,
+  Languages,
+  MessageSquareText,
+  Sparkles,
+} from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useAuth } from "@/components/auth-provider";
-import { API_URL, Document, formatDate } from "@/lib/api";
+
+import { Document, formatDate } from "@/lib/api";
 import { useBackendData } from "@/lib/hooks";
 import { PageHeader, Panel } from "@/components/ui";
-type Provenance={document:Document;versions:{id:string;version_no:number;created_by:string;created_at:string}[];sync_history:{id:string;status:string;detail:string;created_at:string}[];files:{id:string;version_no:number;original_name:string;mime_type:string;size:number;created_at:string}[];access:{type:"public"|"owner"|"approved_request";request_id:string|null}};
-const empty:Provenance={document:{id:"",title:"",doc_type:"",topic:"",owner_code:"",visibility:"public",current_version:0,created_at:"",updated_at:"",folder_path:""},versions:[],sync_history:[],files:[],access:{type:"public",request_id:null}};
+import DocumentInlinePreview from "@/components/document-inline-preview";
+
+type Provenance = {
+  document: Document;
+  versions: {
+    id: string;
+    version_no: number;
+    created_by: string;
+    created_at: string;
+  }[];
+  sync_history: {
+    id: string;
+    status: string;
+    detail: string;
+    created_at: string;
+  }[];
+  files: {
+    id: string;
+    version_no: number;
+    original_name: string;
+    mime_type: string;
+    size: number;
+    created_at: string;
+  }[];
+  access: {
+    type: "public" | "owner" | "approved_request";
+    request_id: string | null;
+  };
+};
+
+const empty: Provenance = {
+  document: {
+    id: "",
+    title: "",
+    doc_type: "",
+    topic: "",
+    owner_code: "",
+    visibility: "public",
+    current_version: 0,
+    created_at: "",
+    updated_at: "",
+    folder_path: "",
+  },
+  versions: [],
+  sync_history: [],
+  files: [],
+  access: { type: "public", request_id: null },
+};
+
 export default function DocumentViewer() {
-  const {id}=useParams<{id:string}>();const {token}=useAuth();const {data,error}=useBackendData<Provenance>(`/api/documents/${id}/provenance`,empty);
-  async function download(assetId:string,name:string){const r=await fetch(`${API_URL}/api/files/${assetId}`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok)return;const url=URL.createObjectURL(await r.blob());const a=document.createElement("a");a.href=url;a.download=name;a.click();URL.revokeObjectURL(url);}
-  if(error)return <div><PageHeader eyebrow="Trình xem tài liệu" title="Không thể mở tài liệu" description="Bạn cần được chủ sở hữu phê duyệt trước khi xem hoặc tải tài liệu riêng tư." actions={<Link className="btn-secondary" href="/permissions"><ChevronLeft size={15}/>Gửi yêu cầu truy cập</Link>}/><p className="rounded bg-red-50 p-4 text-sm text-red-700">{error}</p></div>;
-  return <div><PageHeader eyebrow="Trình xem tài liệu" title={data.document.title||"Đang tải tài liệu..."} description={`${data.document.doc_type} · v${data.document.current_version} · ${data.document.owner_code}`} actions={<Link className="btn-secondary" href="/repository"><ChevronLeft size={15}/>Kho tài liệu</Link>}/>
-    {data.access.type==="approved_request"&&<p className="mb-4 rounded bg-blue-50 p-3 text-xs text-blue-800">Bạn đang xem tài liệu riêng tư này nhờ yêu cầu truy cập đã được chủ sở hữu phê duyệt.</p>}
-    <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_300px]"><Panel title="Phiên bản"><div className="p-2">{data.versions.map(x=><div key={x.id} className="rounded-md px-2 py-2 text-xs"><strong>Phiên bản {x.version_no}</strong><span className="muted block">{x.created_by} · {formatDate(x.created_at)}</span></div>)}</div></Panel>
-    <div className="app-card p-6 md:p-10"><div className="mx-auto max-w-3xl"><span className={`badge ${data.document.visibility==="public"?"badge-green":"badge-amber"}`}>{data.document.visibility==="public"?"Công khai":"Riêng tư"}</span><h2 className="mt-5 text-2xl font-bold">{data.document.title}</h2><p className="muted mt-2 text-sm">{data.document.topic} · {data.document.doc_type}</p><div className="mt-8 grid gap-3 sm:grid-cols-2">{[["Chủ sở hữu",data.document.owner_code],["Thư mục",data.document.folder_path||"Chưa phân loại"],["Ngày tạo",formatDate(data.document.created_at)],["Cập nhật",formatDate(data.document.updated_at)]].map(x=><div key={x[0]} className="rounded-lg border border-[var(--border)] p-3"><span className="muted block text-[10px] uppercase font-bold">{x[0]}</span><strong className="text-xs">{x[1]}</strong></div>)}</div><h3 className="section-title mt-8">Tệp gốc</h3><div className="mt-3 space-y-2">{data.files.map(x=><div key={x.id} className="flex items-center gap-3 rounded-lg border border-[var(--border)] p-3"><FileText size={17} className="text-blue-600"/><div className="flex-1"><strong className="block text-xs">{x.original_name}</strong><span className="muted text-[10px]">v{x.version_no} · {Math.ceil(x.size/1024)} KB</span></div><button className="btn-secondary" onClick={()=>download(x.id,x.original_name)}><Download size={14}/>Tải xuống</button></div>)}{!data.files.length&&<p className="muted text-xs">Tài liệu này chưa có tệp gốc.</p>}</div></div></div>
-    <Panel title="Trợ lý AI"><div className="p-3"><div className="rounded-xl bg-gradient-to-br from-blue-700 to-indigo-800 p-4 text-white"><Sparkles size={18}/><strong className="mt-3 block text-sm">Thông tin nguồn gốc</strong><p className="mt-1 text-[11px] text-blue-100">{data.sync_history.length} lần đồng bộ được ghi nhận.</p></div><div className="mt-4 grid grid-cols-2 gap-2">{[{title:"Tóm tắt",icon:<MessageSquareText size={16}/>},{title:"Giải thích",icon:<BookOpen size={16}/>},{title:"Trích CLO",icon:<Highlighter size={16}/>},{title:"Câu hỏi thường gặp",icon:<FileText size={16}/>},{title:"Dịch",icon:<Languages size={16}/>},{title:"Liên quan",icon:<Sparkles size={16}/>}].map(x=><Link href="/assistant" key={x.title} className="btn-secondary flex-col py-3">{x.icon}<span className="text-[10px]">{x.title}</span></Link>)}</div></div></Panel></div>
-  </div>
+  const { id } = useParams<{ id: string }>();
+
+  const { data, error } = useBackendData<Provenance>(
+    `/api/documents/${id}/provenance`,
+    empty
+  );
+
+  if (error) {
+    return (
+      <div>
+        <PageHeader
+          eyebrow="Trình xem tài liệu"
+          title="Không thể mở tài liệu"
+          description="Bạn cần được chủ sở hữu phê duyệt trước khi xem hoặc tải tài liệu riêng tư."
+          actions={
+            <Link className="btn-secondary" href="/permissions">
+              <ChevronLeft size={15} />
+              Gửi yêu cầu truy cập
+            </Link>
+          }
+        />
+        <p className="rounded bg-red-50 p-4 text-sm text-red-700">{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <PageHeader
+        eyebrow="Trình xem tài liệu"
+        title={data.document.title || "Đang tải tài liệu..."}
+        description={`${data.document.doc_type} · v${data.document.current_version} · ${data.document.owner_code}`}
+        actions={
+          <Link className="btn-secondary" href="/repository">
+            <ChevronLeft size={15} />
+            Kho tài liệu
+          </Link>
+        }
+      />
+
+      {data.access.type === "approved_request" && (
+        <p className="mb-4 rounded bg-blue-50 p-3 text-xs text-blue-800">
+          Bạn đang xem tài liệu riêng tư này nhờ yêu cầu truy cập đã được chủ sở hữu phê duyệt.
+        </p>
+      )}
+
+      <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_300px]">
+        <Panel title="Phiên bản">
+          <div className="p-2">
+            {data.versions.map((x) => (
+              <div key={x.id} className="rounded-md px-2 py-2 text-xs">
+                <strong>Phiên bản {x.version_no}</strong>
+                <span className="muted block">
+                  {x.created_by} · {formatDate(x.created_at)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        <div className="app-card p-6 md:p-10">
+          <div className="mx-auto max-w-3xl">
+            <span
+              className={`badge ${
+                data.document.visibility === "public"
+                  ? "badge-green"
+                  : "badge-amber"
+              }`}
+            >
+              {data.document.visibility === "public" ? "Công khai" : "Riêng tư"}
+            </span>
+
+            <h2 className="mt-5 text-2xl font-bold">{data.document.title}</h2>
+
+            <p className="muted mt-2 text-sm">
+              {data.document.topic} · {data.document.doc_type}
+            </p>
+
+            <div className="mt-8 grid gap-3 sm:grid-cols-2">
+              {[
+                ["Chủ sở hữu", data.document.owner_code],
+                ["Thư mục", data.document.folder_path || "Chưa phân loại"],
+                ["Ngày tạo", formatDate(data.document.created_at)],
+                ["Cập nhật", formatDate(data.document.updated_at)],
+              ].map(([k, v]) => (
+                <div
+                  key={k}
+                  className="rounded-lg border border-[var(--border)] p-3"
+                >
+                  <span className="muted block text-[10px] uppercase font-bold">
+                    {k}
+                  </span>
+                  <strong className="text-xs">{v}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <Panel title="Trợ lý AI">
+          <div className="p-3">
+            <div className="rounded-xl bg-gradient-to-br from-blue-700 to-indigo-800 p-4 text-white">
+              <Sparkles size={18} />
+              <strong className="mt-3 block text-sm">Thông tin nguồn gốc</strong>
+              <p className="mt-1 text-[11px] text-blue-100">
+                {data.sync_history.length} lần đồng bộ được ghi nhận.
+              </p>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              {[
+                { title: "Tóm tắt", icon: <MessageSquareText size={16} /> },
+                { title: "Giải thích", icon: <BookOpen size={16} /> },
+                { title: "Trích CLO", icon: <Highlighter size={16} /> },
+                { title: "Câu hỏi thường gặp", icon: <FileText size={16} /> },
+                { title: "Dịch", icon: <Languages size={16} /> },
+                { title: "Liên quan", icon: <Sparkles size={16} /> },
+              ].map((x) => (
+                <Link
+                  href="/assistant"
+                  key={x.title}
+                  className="btn-secondary flex-col py-3"
+                >
+                  {x.icon}
+                  <span className="text-[10px]">{x.title}</span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </Panel>
+      </div>
+
+      <DocumentInlinePreview documentId={id} files={data.files} />
+    </div>
+  );
 }

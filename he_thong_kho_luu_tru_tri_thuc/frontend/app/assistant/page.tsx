@@ -52,13 +52,28 @@ function FriendlyAnswer({ answer }: { answer: string }) {
 
 function Sources({ citations }: { citations: Citation[] }) {
   if (!citations.length) return null;
-  return <div className="mt-5 border-t border-[var(--border)] pt-4">
-    <p className="mb-3 flex items-center gap-2 text-xs font-bold"><FileText className="text-blue-600" size={15}/>📄 Nguồn tham khảo</p>
-    <div className="grid gap-2 sm:grid-cols-2">{citations.map(item => <Link href={`/documents/${item.id}/preview`} key={item.id} className="block cursor-pointer rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 transition hover:border-blue-300 hover:bg-blue-50/40">
-      <strong className="block text-xs">{item.title}</strong>
-      <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
-    </Link>)}</div>
-  </div>;
+  return (
+    <div className="mt-5 border-t border-[var(--border)] pt-4">
+      <p className="mb-3 flex items-center gap-2 text-xs font-bold">
+        <FileText className="text-blue-600" size={15} /> Nguồn tham khảo
+      </p>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        {citations.map((item) => (
+          <Link
+            href={`/documents/${item.id}`}
+            key={item.id}
+            className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 transition hover:border-blue-300 hover:bg-blue-50/40"
+          >
+            <strong className="block text-xs">{item.title}</strong>
+            <span className="muted mt-1 block text-[10px]">
+              {item.topic} · phiên bản {item.version}
+            </span>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export default function Assistant() {
