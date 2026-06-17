@@ -558,6 +558,11 @@ def validate_folder_access(db, user: dict, folder_node_id: str | None) -> dict |
     return dict(node)
 
 
+def assert_document_destination_node(node: dict | None) -> None:
+    if node and node["type"] in {"faculty", "specialization", "course"}:
+        raise ValueError("Document must be saved inside a document-type folder.")
+
+
 def get_my_folder_tree(db, user: dict) -> dict:
     policy = active_policy(db)
     if not policy:
@@ -991,29 +996,20 @@ def folder_assignment_from_metadata(db, specialization_id: str | None, course_id
 
 
 def normalize_document_folder_assignment(db, folder_node: dict | None, payload: dict, user: dict) -> dict:
+    assert_document_destination_node(folder_node)
     document_type = payload.get("document_type") or payload.get("doc_type") or "Tài liệu khác"
     
     # 1. If folder_node is explicitly selected standard_folder
-    if folder_node and folder_node["type"] == "standard_folder":
+    if folder_node and folder_node["type"] in {"standard_folder", "folder", "document_type_folder"}:
+        assert_document_destination_node(folder_node)
         return {"folder_node_id": folder_node["id"], "folder_path": folder_node["path"]}
         
-    # 2. If folder_node is a course, resolve to standard folder
-    if folder_node and folder_node["type"] == "course":
-        assignment = folder_assignment_from_metadata(db, payload.get("specialization_id"), folder_node["id"], document_type)
-        if assignment["folder_node_id"]:
-            payload["course_id"] = folder_node["id"]
-            return {"folder_node_id": assignment["folder_node_id"], "folder_path": assignment["folder_path"]}
-        else:
-            raise ValueError("Không thể tìm thấy hoặc tạo thư mục chuẩn cho học phần.")
-            
-    # 3. If folder_node is specialization or faculty, raise ValueError
-    if folder_node and folder_node["type"] in {"specialization", "faculty"}:
-        raise ValueError("Tài liệu phải nằm trong thư mục loại tài liệu của một học phần, không được gắn trực tiếp vào chuyên môn hoặc khoa.")
-        
-    # 4. If no folder_node but course_id is provided in payload
+    # 2. If no folder_node but course_id is provided in payload
     if payload.get("course_id"):
         assignment = folder_assignment_from_metadata(db, payload.get("specialization_id"), payload.get("course_id"), document_type)
         if assignment["folder_node_id"]:
+            destination = db.execute("SELECT * FROM folder_nodes WHERE id = ?", (assignment["folder_node_id"],)).fetchone()
+            assert_document_destination_node(dict(destination) if destination else None)
             return {"folder_node_id": assignment["folder_node_id"], "folder_path": assignment["folder_path"]}
         else:
             raise ValueError("Không thể tìm thấy hoặc tạo thư mục chuẩn cho học phần.")
@@ -1132,7 +1128,13 @@ def create_document(db, user: dict, payload: dict, defer_processing: bool = Fals
         folder_row = db.execute("SELECT name FROM folder_nodes WHERE id = ?", (folder_node_id,)).fetchone()
         if folder_row:
             parent_folder_name = folder_row["name"]
-    print(f"DEBUG UPLOAD: document_id={doc_id}, document_title={payload['title']}, parent_folder_id={folder_node_id}, parent_folder_name={parent_folder_name}")
+    print(json.dumps({
+        "event": "DEBUG_UPLOAD",
+        "document_id": doc_id,
+        "document_title": payload["title"],
+        "parent_folder_id": folder_node_id,
+        "parent_folder_name": parent_folder_name,
+    }, ensure_ascii=True))
     db.execute(
         "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
         (f"ver-{uuid.uuid4().hex[:12]}", doc_id, 1, str(path), digest, user["code"], timestamp),
@@ -1370,60 +1372,26 @@ def conversational_fallback(question: str, matches: list[tuple]) -> str:
         detail = sentences[0][:240] if sentences else f"Tài liệu tập trung vào {document['topic']}."
         highlights.append((document["title"], detail))
 
-    topic_lines = "\n\n".join(
-        f"- **{title}**: {detail}" for title, detail in highlights
-    )
-    attention = "\n\n".join(
-        f"⚠️ Chú ý phần **{document['topic']}** trong tài liệu *{document['title']}*."
-        for _, document, _ in matches[:2]
-    )
-    return (
-        "📚 Mình đã đọc các tài liệu liên quan và đây là phần hữu ích nhất cho câu hỏi của bạn.\n\n"
-        "### Nội dung trọng tâm\n\n"
-        f"{topic_lines}\n\n"
-        "### Những phần cần chú ý\n\n"
-        f"{attention}\n\n"
-        "### Gợi ý học tập\n\n"
-        "✅ Đọc lần lượt từng ý trọng tâm, sau đó tự diễn giải lại bằng lời của bạn.\n\n"
-        f"✅ Đối chiếu các ý trên với câu hỏi **{question.strip()}** để xác định phần cần đào sâu.\n\n"
-        "### Bạn có thể hỏi tiếp\n\n"
-        "- Giải thích kỹ hơn từng ý\n"
-        "- Tạo câu hỏi ôn tập từ nội dung này\n"
-        "- So sánh các tài liệu liên quan\n"
-        "- Đề xuất lộ trình học"
-    )
+    lines = "\n".join(f"- **{title}**: {detail}" for title, detail in highlights)
+    return f"Dưới đây là thông tin tìm được từ các tài liệu liên quan:\n\n{lines}"
 
 
 def ensure_conversational_format(answer: str, question: str) -> str:
+    # Strip any source citation block the AI might have appended
     cleaned = re.split(
         r"\n#{0,3}\s*(?:📄\s*)?(?:Nguồn tham khảo|Nguồn tài liệu|Tài liệu tham khảo)\s*:?",
         answer.strip(),
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip()
-    required = (
-        "### Nội dung trọng tâm",
-        "### Những phần cần chú ý",
-        "### Gợi ý học tập",
-        "### Bạn có thể hỏi tiếp",
-    )
-    if all(section in cleaned for section in required):
-        return cleaned
-    return (
-        "📚 Mình đã đọc tài liệu và chọn ra những ý hữu ích nhất cho bạn.\n\n"
-        "### Nội dung trọng tâm\n\n"
-        f"{cleaned}\n\n"
-        "### Những phần cần chú ý\n\n"
-        "⚠️ Hãy đối chiếu các ý trên với **ngữ cảnh và phạm vi áp dụng** trong tài liệu.\n\n"
-        "### Gợi ý học tập\n\n"
-        f"✅ Thử diễn giải lại câu trả lời cho câu hỏi **{question.strip()}** bằng lời của bạn.\n\n"
-        "✅ Chọn một phần chưa rõ và hỏi sâu hơn thay vì đọc lại toàn bộ.\n\n"
-        "### Bạn có thể hỏi tiếp\n\n"
-        "- Giải thích kỹ hơn một phần\n"
-        "- Tạo câu hỏi ôn tập từ nội dung này\n"
-        "- So sánh các tài liệu liên quan\n"
-        "- Đề xuất nội dung nên học tiếp"
-    )
+    # Strip legacy template sections if AI still generates them
+    for pattern in (
+        r"\n###\s*Bạn có thể hỏi tiếp[\s\S]*",
+        r"\n###\s*Gợi ý học tập[\s\S]*",
+        r"\n###\s*Những phần cần chú ý[\s\S]*(?=\n###|$)",
+    ):
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
 
 
 def index_document(db, document_id: str, version_no: int, content: str, force_local: bool = False) -> None:
@@ -1545,8 +1513,12 @@ def quality_report(db) -> dict:
 
 def usage_report(db) -> dict:
     actions = rows(db.execute("SELECT action,COUNT(*) count FROM audit_logs GROUP BY action ORDER BY count DESC").fetchall())
+    action_events = rows(db.execute(
+        "SELECT action,actor_code,created_at FROM audit_logs ORDER BY id DESC LIMIT 100"
+    ).fetchall())
     return {
         "actions": actions,
+        "action_events": action_events,
         "documents": db.execute("SELECT COUNT(*) count FROM documents").fetchone()["count"],
         "users": db.execute("SELECT COUNT(*) count FROM users WHERE active=1").fetchone()["count"],
         "queries": db.execute("SELECT COUNT(*) count FROM audit_logs WHERE action='rag.ask'").fetchone()["count"],

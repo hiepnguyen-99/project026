@@ -123,6 +123,17 @@ class StorageInput(BaseModel):
     enabled: bool = True
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=4, max_length=200)
+
+
+class ProfileUpdateInput(BaseModel):
+    new_name: str = Field(min_length=2, max_length=120)
+    new_department: str = Field(min_length=2, max_length=120)
+    reason: str = Field(min_length=5, max_length=500)
+
+
 class CloudConnectInput(BaseModel):
     provider: Literal["google_drive", "onedrive"]
 
@@ -146,6 +157,7 @@ class UploadConfirmInput(BaseModel):
     folder_node_id: str | None = None
     document_type: str = Field(min_length=2, max_length=80)
     visibility: Literal["public", "private"]
+    final_destination_source: Literal["manual", "ai"] | None = None
 
 
 class SpecializationSelection(BaseModel):
@@ -521,6 +533,81 @@ def update_profile_specializations(payload: SpecializationSelection, user: dict 
             return result
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+@app.put("/api/profile/password")
+def change_password(payload: PasswordChange, user: dict = Depends(current_user)):
+    with transaction() as db:
+        row = db.execute("SELECT password_hash FROM users WHERE code=?", (user["code"],)).fetchone()
+        if not row or row["password_hash"] != hash_secret(payload.current_password):
+            raise HTTPException(400, "Mật khẩu hiện tại không đúng.")
+        db.execute("UPDATE users SET password_hash=? WHERE code=?", (hash_secret(payload.new_password), user["code"]))
+        audit(db, user["code"], "user.password_change", "user", user["code"])
+    return {"message": "Đổi mật khẩu thành công."}
+
+
+@app.post("/api/profile/update-request")
+def submit_profile_update(payload: ProfileUpdateInput, user: dict = Depends(current_user)):
+    with transaction() as db:
+        pending = db.execute(
+            "SELECT id FROM profile_update_requests WHERE user_code=? AND status='pending'",
+            (user["code"],)
+        ).fetchone()
+        if pending:
+            raise HTTPException(400, "Bạn đã có một yêu cầu cập nhật đang chờ duyệt.")
+        req_id = __import__("secrets").token_urlsafe(12)
+        db.execute(
+            "INSERT INTO profile_update_requests VALUES(?,?,?,?,?,?,?,NULL,NULL)",
+            (req_id, user["code"], payload.new_name, payload.new_department, payload.reason, "pending", now()),
+        )
+        audit(db, user["code"], "user.profile_update_request", "user", user["code"])
+    return {"id": req_id, "status": "pending"}
+
+
+@app.get("/api/profile/update-requests")
+def my_profile_update_requests(user: dict = Depends(current_user)):
+    with connection() as db:
+        return rows(db.execute(
+            "SELECT * FROM profile_update_requests WHERE user_code=? ORDER BY created_at DESC LIMIT 5",
+            (user["code"],)
+        ).fetchall())
+
+
+@app.get("/api/admin/profile-update-requests")
+def list_profile_update_requests(user: dict = Depends(require_roles("admin"))):
+    with connection() as db:
+        return rows(db.execute(
+            "SELECT r.*, u.name as current_name, u.department as current_department "
+            "FROM profile_update_requests r JOIN users u ON u.code=r.user_code "
+            "ORDER BY r.created_at DESC"
+        ).fetchall())
+
+
+@app.put("/api/admin/profile-update-requests/{req_id}/approve")
+def approve_profile_update(req_id: str, user: dict = Depends(require_roles("admin"))):
+    with transaction() as db:
+        req = db.execute("SELECT * FROM profile_update_requests WHERE id=?", (req_id,)).fetchone()
+        if not req:
+            raise HTTPException(404, "Yêu cầu không tồn tại.")
+        if req["status"] != "pending":
+            raise HTTPException(400, "Yêu cầu đã được xử lý.")
+        db.execute("UPDATE users SET name=?, department=? WHERE code=?", (req["new_name"], req["new_department"], req["user_code"]))
+        db.execute("UPDATE profile_update_requests SET status='approved',reviewed_at=?,reviewed_by=? WHERE id=?", (now(), user["code"], req_id))
+        audit(db, user["code"], "user.profile_approved", "user", req["user_code"])
+    return {"status": "approved"}
+
+
+@app.put("/api/admin/profile-update-requests/{req_id}/reject")
+def reject_profile_update(req_id: str, user: dict = Depends(require_roles("admin"))):
+    with transaction() as db:
+        req = db.execute("SELECT * FROM profile_update_requests WHERE id=?", (req_id,)).fetchone()
+        if not req:
+            raise HTTPException(404, "Yêu cầu không tồn tại.")
+        if req["status"] != "pending":
+            raise HTTPException(400, "Yêu cầu đã được xử lý.")
+        db.execute("UPDATE profile_update_requests SET status='rejected',reviewed_at=?,reviewed_by=? WHERE id=?", (now(), user["code"], req_id))
+        audit(db, user["code"], "user.profile_rejected", "user", req["user_code"])
+    return {"status": "rejected"}
 
 
 @app.post("/api/lecturers/{lecturer_id}/specializations")
@@ -940,13 +1027,11 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         final_course_id = payload.course_id
         final_document_type = payload.document_type
         selected_node = validate_folder_access(db, user, payload.folder_node_id) if payload.folder_node_id else None
-        if selected_node and selected_node["type"] in {"specialization", "faculty"}:
-            raise HTTPException(400, "Tai lieu phai duoc luu trong hoc phan hoac thu muc loai tai lieu.")
+        if selected_node and selected_node["type"] in {"faculty", "specialization", "course"}:
+            raise HTTPException(400, "Document must be saved inside a document-type folder.")
         if selected_node and selected_node["type"] == "standard_folder":
             final_document_type = selected_node["name"]
             final_course_id = selected_node["parent_id"]
-        elif selected_node and selected_node["type"] == "course":
-            final_course_id = selected_node["id"]
         selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
         if selected_course:
             spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
@@ -955,6 +1040,18 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
         if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
             raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
+        destination_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND status='active'", (assignment["folder_node_id"],)).fetchone() if assignment["folder_node_id"] else None
+        if destination_node and destination_node["type"] in {"faculty", "specialization", "course"}:
+            raise HTTPException(400, "Document must be saved inside a document-type folder.")
+        print(json.dumps({
+            "document_title": metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem,
+            "course_id": final_course_id,
+            "document_type": final_document_type,
+            "resolved_destination_folder_id": assignment["folder_node_id"],
+            "resolved_destination_folder_name": destination_node["name"] if destination_node else None,
+            "resolved_destination_folder_type": destination_node["type"] if destination_node else None,
+            "final_destination_source": payload.final_destination_source,
+        }, ensure_ascii=True))
         title = metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem
         topic = selected_course["name"] if selected_course else metadata.get("topic") or final_document_type
         raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
@@ -1026,13 +1123,16 @@ def delete_upload_task(task_id: str, user: dict = Depends(current_user)):
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
             raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
-        if task["status"] in {"uploading", "uploaded", "analyzing", "saving_metadata"} and task["uploaded_bytes"] > 0:
+        if task["status"] in {"processing", "saving_metadata"}:
             raise HTTPException(409, "Không thể xóa tác vụ đang xử lý.")
         temp_path = __import__("pathlib").Path(task["temp_path"])
+        db.execute("DELETE FROM document_classification_tickets WHERE upload_task_id=?", (task_id,))
         db.execute("DELETE FROM upload_tasks WHERE id=?", (task_id,))
+        action = "upload.removed" if task["document_id"] else "upload.cancelled"
+        audit(db, user["code"], action, "upload_task", task_id, {"filename": task["filename"], "status": task["status"]})
     if temp_path.exists():
         temp_path.unlink()
-    return {"status": "deleted", "id": task_id}
+    return {"status": "deleted" if task["document_id"] else "cancelled", "id": task_id}
 
 
 @app.post("/api/documents/upload", status_code=201)

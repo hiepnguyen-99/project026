@@ -68,7 +68,7 @@ type UploadContextValue = {
   tasks: UploadTask[];
   startUpload: (file: File, metadata: UploadMetadata) => Promise<string>;
   retryUpload: (taskId: string) => Promise<void>;
-  removeTask: (taskId: string) => Promise<void>;
+  removeTask: (taskId: string, skipConfirm?: boolean) => Promise<void>;
 };
 
 const UploadContext = createContext<UploadContextValue | null>(null);
@@ -211,10 +211,22 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
     else setTasks(current => current.map(item => item.id === task.id ? { ...item, error: "Hãy chọn lại file để thử tải lên từ đầu." } : item));
   }
 
-  async function removeTask(taskId: string) {
-    await api(`/api/uploads/${taskId}`, { method: "DELETE" }, token);
-    files.current.delete(taskId);
-    setTasks(current => current.filter(task => task.id !== taskId));
+  async function removeTask(taskId: string, skipConfirm = false) {
+    const task = tasks.find(item => item.id === taskId);
+    const message = task?.document_id || task?.status === "completed"
+      ? "Xóa tác vụ này khỏi danh sách Upload gần đây?"
+      : "Bạn có chắc muốn hủy file upload này không?";
+    if (!skipConfirm && !window.confirm(message)) return;
+    try {
+      await api(`/api/uploads/${taskId}`, { method: "DELETE" }, token);
+      files.current.delete(taskId);
+      setTasks(current => current.filter(item => item.id !== taskId));
+    } catch (error) {
+      setTasks(current => current.map(item => item.id === taskId ? {
+        ...item,
+        error: error instanceof Error ? error.message : "Không thể xóa tác vụ upload.",
+      } : item));
+    }
   }
 
   return <UploadContext.Provider value={{ tasks, startUpload, retryUpload, removeTask }}>
@@ -231,12 +243,14 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
         {tasks.slice(0, 8).map(task => {
           const progress = Math.round(task.uploaded_bytes / task.total_bytes * 100);
           const active = !["completed", "failed"].includes(task.status);
+          const canCancel = ["pending_confirmation", "failed"].includes(task.status);
           return <div key={task.id} className="rounded-xl border border-[var(--border)] p-3">
             <div className="flex items-start gap-2">
               {task.status === "completed" ? <CheckCircle2 className="mt-0.5 text-green-600" size={16}/> : task.status === "failed" ? <XCircle className="mt-0.5 text-red-600" size={16}/> : <LoaderCircle className="mt-0.5 animate-spin text-blue-600" size={16}/>}
               <div className="min-w-0 flex-1"><strong className="block truncate text-xs">{task.filename}</strong><span className="muted text-[10px]">{statusLabels[task.status]}</span></div>
               {task.status === "failed" && <button className="btn-secondary px-2 py-1 text-[10px]" onClick={() => retryUpload(task.id)}><RefreshCw size={11}/>Thử lại</button>}
-              {!active && <button className="icon-btn h-7 w-7" aria-label="Xóa tác vụ" onClick={() => removeTask(task.id)}><Trash2 size={12}/></button>}
+              {canCancel && <button className="btn-secondary px-2 py-1 text-[10px] text-red-600" onClick={() => removeTask(task.id)}><Trash2 size={11}/>Hủy upload</button>}
+              {!active && !canCancel && <button className="icon-btn h-7 w-7" aria-label="Xóa tác vụ" onClick={() => removeTask(task.id)}><Trash2 size={12}/></button>}
             </div>
             <div className="progress mt-3"><i style={{ width: `${active ? progress : 100}%` }} className={task.status === "failed" ? "!bg-red-500" : task.status === "completed" ? "!bg-green-500" : ""}/></div>
             <div className="muted mt-1 flex justify-between text-[10px]"><span>{formatBytes(task.uploaded_bytes)} / {formatBytes(task.total_bytes)}</span><span>{progress}%</span></div>

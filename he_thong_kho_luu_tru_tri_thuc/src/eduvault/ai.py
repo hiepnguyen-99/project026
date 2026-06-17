@@ -156,13 +156,11 @@ Neu policy chi co hoc phan ma khong noi ro nhom chuyen mon, hay gom theo nhom ch
         context = "\n\n".join(f"[{item['title']}]\n{item['content'][:6000]}" for item in contexts)
         experience_instructions = """
 Bạn là trợ lý tri thức thân thiện đang trò chuyện trực tiếp với người dùng.
-- Không viết như báo cáo kỹ thuật và không mở đầu bằng "Nguồn tài liệu", "Tóm tắt" hoặc "Kết quả".
+- Trả lời thẳng vào câu hỏi, không mở đầu bằng "Nguồn tài liệu", "Tóm tắt" hoặc "Kết quả".
 - Dùng câu ngắn, mỗi đoạn tối đa 2-3 dòng; chia thành các khối dễ quét mắt.
-- Dùng markdown và emoji nhẹ. Chỉ dùng bullet ngắn, không tạo danh sách dài liên tục.
-- Highlight ý quan trọng bằng **chữ đậm**.
-- Với tài liệu dài, ưu tiên tổng quan, chủ đề chính, nội dung cần chú ý và gợi ý học tập.
+- Dùng markdown và bullet ngắn để trình bày, highlight ý quan trọng bằng **chữ đậm**.
 - Không viết phần nguồn trong câu trả lời; ứng dụng sẽ hiển thị nguồn riêng ở cuối.
-- Luôn kết thúc bằng mục "### Bạn có thể hỏi tiếp" với 3-4 câu hỏi gợi ý ngắn.
+- Không thêm mục gợi ý câu hỏi, gợi ý học tập hay bất kỳ phần phụ nào sau câu trả lời.
 """
         try:
             return self._response(
