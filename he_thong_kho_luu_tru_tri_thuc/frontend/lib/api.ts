@@ -7,6 +7,7 @@ export type User = {
   name: string;
   role: "lecturer" | "new_lecturer" | "head" | "admin";
   department: string;
+  permissions: string[];
 };
 
 export type Document = {
@@ -14,12 +15,14 @@ export type Document = {
   title: string;
   doc_type: string;
   topic: string;
+  status?: "UPLOADED" | "PROCESSING" | "INDEXED" | "FAILED";
   owner_code: string;
   visibility: "public" | "private";
   current_version: number;
   created_at: string;
   updated_at: string;
   folder_path: string;
+  folder_node_id?: string;
   owner_anonymous?: boolean;
   v2_state?: {
     classification: string;
@@ -42,6 +45,71 @@ export type V2Status = {
   services: Record<string, { provider: string; configured: boolean; available: boolean; detail?: string }>;
   objects: { provider: string; count: number; size: number }[];
   outbox: { status: string; count: number }[];
+};
+
+export type FolderNode = {
+  id: string;
+  name: string;
+  parent_id?: string;
+  type: "faculty" | "department" | "specialization" | "course" | "standard_folder" | "folder";
+  policy_id: string;
+  path: string;
+  status: "active" | "deprecated";
+  children: FolderNode[];
+};
+
+export type ParsedPolicyTree = {
+  faculty: string;
+  faculty_code?: string;
+  specializations: {
+    name: string;
+    description?: string;
+    courses: { name: string; code?: string; description?: string; standard_folders: string[] }[];
+  }[];
+  standard_folders?: string[];
+};
+
+export type PolicyFile = {
+  id: string;
+  title: string;
+  file_path: string;
+  status: "draft" | "active" | "archived";
+  raw_text: string;
+  parsed_json: ParsedPolicyTree;
+  created_by: string;
+  created_at: string;
+  activated_at?: string;
+};
+
+export type MyFolderTree = {
+  policy: PolicyFile | null;
+  name: string;
+  children: FolderNode[];
+  message?: string;
+};
+
+export type Specialization = {
+  id: string;
+  name: string;
+  description: string;
+  policy_id?: string;
+  folder_node_id?: string;
+  courses_count?: number;
+};
+
+export type LecturerFolderNode = {
+  id: string;
+  name: string;
+  type: "root" | "specialization" | "course" | "folder" | "standard_folder";
+  children: LecturerFolderNode[];
+};
+
+export type ProfileSpecializations = {
+  policy: PolicyFile | null;
+  available: Specialization[];
+  selected_ids: string[];
+  folder_tree?: LecturerFolderNode;
+  message?: string;
 };
 
 export type DocumentDetail = Document & {

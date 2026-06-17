@@ -27,7 +27,7 @@ type CloudConnection = {
 };
 
 const emptyDash: DashboardData = {
-  user: { code: "", name: "", role: "lecturer", department: "" },
+  user: { code: "", name: "", role: "lecturer", department: "", permissions: [] },
   stats: { documents: 0, private: 0, topics: 0 },
   documents: [],
   requests: [],

@@ -4,25 +4,29 @@ import secrets
 import html
 import os
 import difflib
+import json
+import re
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import ClientDisconnect
 
 from .ai import ai_provider
 from .cloud import PROVIDERS, authorization_url, disconnect, exchange_code, list_connections, sync_user_document
-from .database import ROOT, connection, database_backend, hash_secret, init_database, now, rows, transaction
+from .database import DATA_DIR, ROOT, connection, database_backend, hash_secret, init_database, now, rows, transaction
 from .infrastructure import infrastructure_status
 from .services import (
-    anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup,
-    create_document, extract_text, guess_metadata, index_document, knowledge_summary, list_deleted_documents, list_documents, permanently_delete_document,
-    quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
-    set_v2_state, soft_delete_document, suggest_folder, sync_document, update_document, usage_report, v2_state_for,
+    anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup, delete_policy_file,
+    DOCUMENT_TYPES, active_course_suggestions, active_policy, create_document, create_policy_file, enqueue_processing_jobs, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
+    list_deleted_documents, list_documents, list_policy_files, master_tree, permanently_delete_document,
+    build_lecturer_folder_tree, profile_specializations, public_specializations, quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
+    quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
+    activate_policy_file, set_user_specializations, validate_folder_access,
 )
 
 
@@ -30,7 +34,7 @@ from .services import (
 async def lifespan(_app: FastAPI):
     init_database()
     with transaction() as db:
-        for document in db.execute("SELECT * FROM documents").fetchall():
+        for document in db.execute("SELECT * FROM documents WHERE status='INDEXED'").fetchall():
             exists = db.execute("SELECT 1 FROM chunks WHERE document_id=?", (document["id"],)).fetchone()
             if not exists:
                 # Startup must remain available even when an external AI provider is slow.
@@ -66,6 +70,7 @@ class DocumentInput(BaseModel):
     visibility: Literal["public", "private"]
     content: str = Field(min_length=1)
     folder_path: str | None = None
+    folder_node_id: str | None = None
 
 
 class AnalyzeInput(BaseModel):
@@ -122,6 +127,31 @@ class CloudConnectInput(BaseModel):
     provider: Literal["google_drive", "onedrive"]
 
 
+class UploadInitInput(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    mime_type: str = Field(default="application/octet-stream", max_length=255)
+    total_bytes: int = Field(gt=0)
+    title: str = Field(min_length=2, max_length=200)
+    topic: str = Field(min_length=2, max_length=120)
+    doc_type: str = Field(min_length=2, max_length=80)
+    visibility: Literal["public", "private"]
+    folder_path: str | None = None
+    folder_node_id: str | None = None
+    existing_document_id: str | None = None
+
+
+class UploadConfirmInput(BaseModel):
+    specialization_id: str | None = None
+    course_id: str | None = None
+    folder_node_id: str | None = None
+    document_type: str = Field(min_length=2, max_length=80)
+    visibility: Literal["public", "private"]
+
+
+class SpecializationSelection(BaseModel):
+    specialization_ids: list[str] = Field(default_factory=list)
+
+
 def current_user(authorization: str = Header(default="")) -> dict:
     token = authorization.removeprefix("Bearer ").strip()
     with connection() as db:
@@ -139,6 +169,37 @@ def require_roles(*roles):
             raise HTTPException(403, "Bạn không có quyền thực hiện thao tác này.")
         return user
     return dependency
+
+
+ROLE_PERMISSIONS = {
+    "admin": [
+        "dashboard.view", "repository.view", "repository.upload", "policy.manage", "users.manage",
+        "permissions.manage", "backup.manage", "reports.view", "audit.view", "profile.manage",
+    ],
+    "head": [
+        "dashboard.view", "repository.view", "transfer.manage", "quality.view", "reports.view", "profile.manage",
+    ],
+    "lecturer": [
+        "dashboard.view", "repository.own", "repository.upload", "versions.view", "chatbot.use", "profile.manage",
+    ],
+    "new_lecturer": [
+        "dashboard.view", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage",
+    ],
+}
+
+
+def permissions_for_role(role: str) -> list[str]:
+    return ROLE_PERMISSIONS.get(role, ["dashboard.view"])
+
+
+def public_user(user: dict) -> dict:
+    return {
+        "code": user["code"],
+        "name": user["name"],
+        "role": user["role"],
+        "department": user["department"],
+        "permissions": permissions_for_role(user["role"]),
+    }
 
 
 def get_document(db, document_id: str) -> dict:
@@ -242,11 +303,18 @@ def sync_personal_cloud(provider: Literal["google_drive", "onedrive"], user: dic
         for document in db.execute(
             "SELECT * FROM documents WHERE owner_code=? AND deleted_at IS NULL", (user["code"],)
         ).fetchall():
+            asset = db.execute(
+                """SELECT original_path FROM file_assets
+                   WHERE document_id=? AND version_no=?
+                   ORDER BY created_at DESC, id DESC LIMIT 1""",
+                (document["id"], document["current_version"]),
+            ).fetchone()
             version = db.execute(
                 "SELECT storage_path FROM versions WHERE document_id=? AND version_no=?",
                 (document["id"], document["current_version"]),
             ).fetchone()
-            results.extend(sync_user_document(db, user["code"], document["id"], __import__("pathlib").Path(version["storage_path"]), provider))
+            source_path = asset["original_path"] if asset else version["storage_path"]
+            results.extend(sync_user_document(db, user["code"], document["id"], __import__("pathlib").Path(source_path), provider))
         audit(db, user["code"], "cloud.sync", "cloud", provider, {"documents": len(results)})
         return {"provider": provider, "results": results}
 
@@ -260,8 +328,7 @@ def login(payload: Login):
         token = secrets.token_urlsafe(32)
         db.execute("INSERT INTO sessions VALUES(?,?,?)", (token, user["code"], now()))
         audit(db, user["code"], "auth.login", "session", token[:8])
-        public = {key: user[key] for key in ("code", "name", "role", "department")}
-        return {"token": token, "user": public}
+        return {"token": token, "user": public_user(dict(user))}
 
 
 @app.post("/api/auth/logout")
@@ -282,7 +349,7 @@ def dashboard(user: dict = Depends(current_user)):
             if request["requester_code"] == user["code"] and request["owner_code"] != user["code"]:
                 request["owner_code"] = "Ẩn danh"
         return {
-            "user": {key: user[key] for key in ("code", "name", "role", "department")},
+            "user": public_user(user),
             "stats": {"documents": len(docs), "private": sum(d["visibility"] == "private" for d in docs), "topics": len({d["topic"] for d in docs})},
             "documents": [
                 {**item, "v2_state": v2_state_for(db, item["id"])}
@@ -362,15 +429,156 @@ def folder_tree(user: dict = Depends(current_user)):
     return tree
 
 
+@app.post("/api/policies/upload", status_code=201)
+async def upload_policy(
+    request: Request,
+    x_filename: str = Header(default="policy.txt"),
+    x_title: str = Header(default="Policy khoa"),
+    user: dict = Depends(require_roles("admin")),
+):
+    from urllib.parse import unquote
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "File policy dang trong.")
+    with transaction() as db:
+        try:
+            return create_policy_file(
+                db,
+                user,
+                unquote(x_title),
+                unquote(x_filename),
+                raw,
+                request.headers.get("content-type", "text/plain"),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/policies")
+def policy_files(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        return list_policy_files(db)
+
+
+@app.post("/api/policies/{policy_id}/activate")
+def activate_policy(policy_id: str, user: dict = Depends(require_roles("admin"))):
+    try:
+        with transaction() as db:
+            return activate_policy_file(db, user, policy_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.delete("/api/policies/{policy_id}")
+def delete_policy(policy_id: str, user: dict = Depends(require_roles("admin"))):
+    try:
+        with transaction() as db:
+            return delete_policy_file(db, user, policy_id)
+    except PermissionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/admin/master-tree")
+def admin_master_tree(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        return master_tree(db)
+
+
+@app.get("/api/master-folder-tree")
+def api_master_folder_tree(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        result = master_tree(db)
+    return [result["tree"]] if result.get("tree") else []
+
+
+@app.get("/master-tree")
+def public_master_tree(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        result = master_tree(db)
+    return [result["tree"]] if result.get("tree") else []
+
+
+@app.get("/api/specializations")
+def api_specializations(user: dict = Depends(current_user)):
+    with connection() as db:
+        return public_specializations(db)
+
+
+@app.get("/api/profile/specializations")
+def get_profile_specializations(user: dict = Depends(current_user)):
+    with connection() as db:
+        return profile_specializations(db, user["code"])
+
+
+@app.put("/api/profile/specializations")
+def update_profile_specializations(payload: SpecializationSelection, user: dict = Depends(current_user)):
+    try:
+        with transaction() as db:
+            result = set_user_specializations(db, user, payload.specialization_ids)
+            result["message"] = "Cay thu muc cua ban da duoc cap nhat theo policy hien hanh."
+            return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/lecturers/{lecturer_id}/specializations")
+def update_lecturer_specializations(lecturer_id: str, payload: SpecializationSelection, user: dict = Depends(current_user)):
+    if user["code"] != lecturer_id and user["role"] not in {"admin", "head"}:
+        raise HTTPException(403, "Ban khong co quyen cap nhat nhom chuyen mon cua nguoi dung nay.")
+    try:
+        with transaction() as db:
+            target = db.execute("SELECT * FROM users WHERE code=? AND active=1", (lecturer_id,)).fetchone()
+            if not target:
+                raise HTTPException(404, "Khong tim thay giang vien.")
+            result = set_user_specializations(db, dict(target), payload.specialization_ids)
+            result["folder_tree"] = build_lecturer_folder_tree(db, lecturer_id)
+            result["message"] = "Cay thu muc ca nhan da duoc tao tu chuyen mon da chon."
+            return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/my-folder-tree")
+def my_folder_tree(user: dict = Depends(current_user)):
+    with connection() as db:
+        return get_my_folder_tree(db, user)
+
+
+@app.get("/api/lecturers/{lecturer_id}/folder-tree")
+def lecturer_folder_tree(lecturer_id: str, user: dict = Depends(current_user)):
+    if user["code"] != lecturer_id and user["role"] not in {"admin", "head"}:
+        raise HTTPException(403, "Ban khong co quyen xem cay thu muc cua nguoi dung nay.")
+    with connection() as db:
+        target = db.execute("SELECT * FROM users WHERE code=? AND active=1", (lecturer_id,)).fetchone()
+        if not target:
+            raise HTTPException(404, "Khong tim thay giang vien.")
+        tree = build_lecturer_folder_tree(db, lecturer_id)
+    return [tree]
+
+
+@app.get("/virtual-tree/{user_id}")
+def virtual_tree(user_id: str, user: dict = Depends(current_user)):
+    if user["code"] != user_id and user["role"] not in {"admin", "head"}:
+        raise HTTPException(403, "Ban khong co quyen xem cay thu muc cua nguoi dung nay.")
+    with connection() as db:
+        target = db.execute("SELECT * FROM users WHERE code=? AND active=1", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(404, "Khong tim thay nguoi dung.")
+        result = get_my_folder_tree(db, dict(target))
+    return result["children"]
+
+
 @app.get("/api/rag/pipeline")
 def rag_pipeline(user: dict = Depends(current_user)):
     with connection() as db:
         documents = db.execute(
-            "SELECT COUNT(*) count FROM documents WHERE deleted_at IS NULL AND (visibility='public' OR owner_code=?)",
+            "SELECT COUNT(*) count FROM documents WHERE deleted_at IS NULL AND status='INDEXED' AND (visibility='public' OR owner_code=?)",
             (user["code"],),
         ).fetchone()["count"]
         chunks = db.execute(
-            "SELECT COUNT(*) count FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.deleted_at IS NULL AND (d.visibility='public' OR d.owner_code=?)",
+            "SELECT COUNT(*) count FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.deleted_at IS NULL AND d.status='INDEXED' AND (d.visibility='public' OR d.owner_code=?)",
             (user["code"],),
         ).fetchone()["count"]
     return {
@@ -396,17 +604,448 @@ def create(payload: DocumentInput, user: dict = Depends(current_user)):
             return create_document(db, user, payload.model_dump())
     except ValueError as exc:
         raise HTTPException(409, str(exc))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
+
+
+def upload_task_public(task) -> dict:
+    item = dict(task)
+    item["metadata"] = json.loads(item["metadata"])
+    item.pop("temp_path", None)
+    return item
+
+
+def classification_ticket_public(ticket) -> dict:
+    item = dict(ticket)
+    item["suggestions"] = json.loads(item["suggestions"])
+    return item
+
+
+def create_classification_ticket(db, task, user: dict) -> dict:
+    existing = db.execute(
+        "SELECT * FROM document_classification_tickets WHERE upload_task_id=? ORDER BY created_at DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    if existing and existing["status"] in {"PENDING_CONFIRMATION", "CONFIRMED"}:
+        return classification_ticket_public(existing)
+    raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+    preview = quick_preview_text(task["filename"], task["mime_type"], raw)
+    metadata = json.loads(task["metadata"])
+    suggestions = active_course_suggestions(db, task["filename"], preview)
+    top = suggestions[0] if suggestions else {}
+    text = f"{task['filename']} {preview}".casefold()
+    suggested_type = metadata.get("doc_type") if metadata.get("doc_type") in DOCUMENT_TYPES else "Tài liệu khác"
+    for candidate in DOCUMENT_TYPES:
+        if candidate.casefold() in text or candidate.replace(" ", "_").casefold() in text:
+            suggested_type = candidate
+            break
+    confidence = float(top.get("confidence") or 0)
+    reasoning = (
+        f"AI đọc nhanh tên file và 1-2 trang đầu. Gợi ý học phần '{top.get('course', '')}' "
+        f"vì nội dung/tên file có độ khớp {round(confidence * 100)}%."
+        if top else
+        "AI đọc nhanh tên file và 1-2 trang đầu nhưng chưa tìm thấy học phần khớp đủ rõ trong Master Tree."
+    )
+    ticket_id = f"ticket-{secrets.token_hex(8)}"
+    timestamp = now()
+    db.execute(
+        """INSERT INTO document_classification_tickets(
+           id,upload_task_id,user_code,filename,suggested_specialization_id,suggested_specialization,
+           suggested_course_id,suggested_course,suggested_document_type,suggested_visibility,confidence,
+           reasoning,suggestions,selected_specialization_id,selected_course_id,selected_document_type,
+           selected_visibility,status,document_id,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDING_CONFIRMATION', NULL, ?, ?)""",
+        (
+            ticket_id, task["id"], user["code"], task["filename"], top.get("specialization_id"), top.get("specialization"),
+            top.get("course_id"), top.get("course"), suggested_type, metadata.get("visibility", "private"), confidence,
+            reasoning, json.dumps(suggestions, ensure_ascii=False), top.get("specialization_id"), top.get("course_id"),
+            suggested_type, metadata.get("visibility", "private"), timestamp, timestamp,
+        ),
+    )
+    ticket = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket_id,)).fetchone())
+    task_metadata = {**metadata, "classification_ticket": ticket}
+    db.execute(
+        "UPDATE upload_tasks SET status='pending_confirmation',metadata=?,error=NULL,updated_at=? WHERE id=?",
+        (json.dumps(task_metadata, ensure_ascii=False), timestamp, task["id"]),
+    )
+    audit(db, user["code"], "upload.classification_ticket", "upload_task", task["id"], {"ticket_id": ticket_id, "confidence": confidence})
+    return ticket
+
+
+def process_upload_task(task_id: str) -> None:
+    try:
+        with transaction() as db:
+            task = db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone()
+            if not task or task["uploaded_bytes"] != task["total_bytes"]:
+                raise ValueError("File chưa được tải lên đầy đủ.")
+            db.execute(
+                "UPDATE upload_tasks SET status='analyzing',error=NULL,updated_at=? WHERE id=?",
+                (now(), task_id),
+            )
+        raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+        content = extract_text(task["filename"], task["mime_type"], raw)
+        with connection() as db:
+            prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
+            prompts = json.loads(prompt_row["value"]) if prompt_row else {}
+        ai_metadata = guess_metadata(task["filename"], content, prompts.get("metadata_instructions"))
+        with transaction() as db:
+            task = db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone()
+            user = db.execute("SELECT * FROM users WHERE code=?", (task["user_code"],)).fetchone()
+            metadata = json.loads(task["metadata"])
+            existing_id = metadata.get("existing_document_id")
+            applied_metadata = {
+                "title": metadata["title"] if existing_id else ai_metadata["title"],
+                "topic": ai_metadata["topic"],
+                "doc_type": ai_metadata["doc_type"],
+                "visibility": metadata["visibility"],
+            }
+            folder_path = metadata.get("folder_path") or suggest_folder(db, dict(user), applied_metadata)
+            task_metadata = {
+                **metadata,
+                "ai_metadata": ai_metadata,
+                "applied_metadata": {**applied_metadata, "folder_path": folder_path},
+            }
+            db.execute(
+                "UPDATE upload_tasks SET status='saving_metadata',metadata=?,updated_at=? WHERE id=?",
+                (json.dumps(task_metadata, ensure_ascii=False), now(), task_id),
+            )
+            payload = {
+                **applied_metadata,
+                "folder_path": folder_path,
+                "folder_node_id": metadata.get("folder_node_id"),
+                "content": content,
+            }
+            if existing_id:
+                document = update_document(db, dict(user), get_active_document(db, existing_id), payload, defer_processing=True)
+                version_no = document["current_version"]
+            else:
+                document = create_document(db, dict(user), payload, defer_processing=True)
+                version_no = 1
+            asset = save_file_asset(db, document["id"], version_no, task["filename"], task["mime_type"], raw, defer_processing=True)
+            version = db.execute(
+                "SELECT storage_path FROM versions WHERE document_id=? AND version_no=?",
+                (document["id"], version_no),
+            ).fetchone()
+
+        with transaction() as db:
+            index_document(db, document["id"], version_no, content, force_local=True)
+            sync_document(db, document["id"], __import__("pathlib").Path(version["storage_path"]))
+            audit(db, task["user_code"], "upload.completed", "document", document["id"], {"task_id": task_id})
+            db.execute(
+                "UPDATE upload_tasks SET status='completed',document_id=?,error=NULL,updated_at=? WHERE id=?",
+                (document["id"], now(), task_id),
+            )
+        with transaction() as db:
+            sync_user_document(db, task["user_code"], document["id"], __import__("pathlib").Path(asset["original_path"]))
+    except Exception as exc:
+        with transaction() as db:
+            db.execute(
+                "UPDATE upload_tasks SET status='failed',error=?,updated_at=? WHERE id=?",
+                (str(exc), now(), task_id),
+            )
+
+
+def process_document_background(document_id: str, task_id: str | None = None) -> None:
+    try:
+        with transaction() as db:
+            document = run_document_processing_jobs(db, document_id)
+            if task_id:
+                db.execute(
+                    "UPDATE upload_tasks SET status='completed',document_id=?,error=NULL,updated_at=? WHERE id=?",
+                    (document_id, now(), task_id),
+                )
+            version = db.execute(
+                "SELECT storage_path FROM versions WHERE document_id=? AND version_no=?",
+                (document_id, document["current_version"]),
+            ).fetchone()
+            if version:
+                sync_document(db, document_id, __import__("pathlib").Path(version["storage_path"]))
+            asset = db.execute(
+                "SELECT original_path FROM file_assets WHERE document_id=? AND version_no=? ORDER BY created_at DESC LIMIT 1",
+                (document_id, document["current_version"]),
+            ).fetchone()
+            if asset:
+                sync_user_document(db, document["owner_code"], document_id, __import__("pathlib").Path(asset["original_path"]))
+    except Exception as exc:
+        with transaction() as db:
+            if task_id:
+                db.execute("UPDATE upload_tasks SET status='failed',error=?,updated_at=? WHERE id=?", (str(exc), now(), task_id))
+
+
+def save_upload_task_fast(task_id: str) -> str:
+    with transaction() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone()
+        if not task or task["uploaded_bytes"] != task["total_bytes"]:
+            raise ValueError("File chưa được tải lên đầy đủ.")
+        if task["document_id"]:
+            return task["document_id"]
+        raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+        preview = quick_preview_text(task["filename"], task["mime_type"], raw)
+        user = db.execute("SELECT * FROM users WHERE code=?", (task["user_code"],)).fetchone()
+        metadata = json.loads(task["metadata"])
+        suggestion = suggest_upload_destination(db, dict(user), task["filename"], preview)
+        ai_metadata = guess_metadata(task["filename"], preview)
+        doc_type = metadata["doc_type"] if metadata.get("doc_type") in DOCUMENT_TYPES else "Tài liệu khác"
+        applied_metadata = {
+            "title": metadata["title"],
+            "topic": suggestion.get("course") or suggestion.get("specialization") or ai_metadata.get("topic") or metadata.get("topic") or "Chưa phân loại",
+            "doc_type": doc_type,
+            "visibility": metadata["visibility"],
+        }
+        folder_path = metadata.get("folder_path") or suggestion.get("folder_path") or suggest_folder(db, dict(user), applied_metadata)
+        task_metadata = {
+            **metadata,
+            "quick_suggestion": suggestion,
+            "ai_metadata": ai_metadata,
+            "applied_metadata": {**applied_metadata, "folder_path": folder_path},
+        }
+        db.execute(
+            "UPDATE upload_tasks SET status='saving_metadata',metadata=?,updated_at=? WHERE id=?",
+            (json.dumps(task_metadata, ensure_ascii=False), now(), task_id),
+        )
+        payload = {
+            **applied_metadata,
+            "folder_path": folder_path,
+            "folder_node_id": metadata.get("folder_node_id"),
+            "content": f"File: {task['filename']}\nStatus: UPLOADED. AI processing is running asynchronously.\n\n{preview[:4000]}",
+        }
+        existing_id = metadata.get("existing_document_id")
+        if existing_id:
+            document = update_document(db, dict(user), get_active_document(db, existing_id), payload, defer_processing=True)
+            version_no = document["current_version"]
+        else:
+            document = create_document(db, dict(user), payload, defer_processing=True)
+            version_no = 1
+        asset = save_file_asset(db, document["id"], version_no, task["filename"], task["mime_type"], raw, defer_processing=True)
+        enqueue_processing_jobs(db, document["id"])
+        db.execute("UPDATE documents SET status='PROCESSING',updated_at=? WHERE id=?", (now(), document["id"]))
+        set_v2_state(db, document["id"], indexing_status="processing")
+        audit(db, task["user_code"], "upload.saved_fast", "document", document["id"], {"task_id": task_id, "asset_id": asset["id"]})
+        db.execute(
+            "UPDATE upload_tasks SET status='completed',document_id=?,error=NULL,updated_at=? WHERE id=?",
+            (document["id"], now(), task_id),
+        )
+        return document["id"]
+
+
+@app.post("/api/uploads/init", status_code=201)
+def init_upload(payload: UploadInitInput, user: dict = Depends(current_user)):
+    if payload.total_bytes > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
+    if payload.existing_document_id:
+        with connection() as db:
+            document = get_active_document(db, payload.existing_document_id)
+            if document["owner_code"] != user["code"]:
+                raise HTTPException(403, "Bạn không có quyền cập nhật tài liệu này.")
+            try:
+                validate_folder_access(db, user, payload.folder_node_id or document.get("folder_node_id"))
+            except PermissionError as exc:
+                raise HTTPException(403, str(exc))
+    elif payload.folder_node_id:
+        with connection() as db:
+            try:
+                validate_folder_access(db, user, payload.folder_node_id)
+            except PermissionError as exc:
+                raise HTTPException(403, str(exc))
+    task_id = f"upload-{secrets.token_hex(8)}"
+    upload_dir = DATA_DIR / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = upload_dir / f"{task_id}.part"
+    temp_path.write_bytes(b"")
+    timestamp = now()
+    metadata = payload.model_dump(exclude={"filename", "mime_type", "total_bytes"})
+    with transaction() as db:
+        db.execute(
+            """INSERT INTO upload_tasks(id,user_code,filename,mime_type,total_bytes,uploaded_bytes,status,metadata,temp_path,document_id,error,created_at,updated_at)
+               VALUES(?,?,?,?,?,0,'uploading',?,?,NULL,NULL,?,?)""",
+            (
+                task_id, user["code"], payload.filename, payload.mime_type, payload.total_bytes,
+                json.dumps(metadata, ensure_ascii=False), str(temp_path), timestamp, timestamp,
+            ),
+        )
+        audit(db, user["code"], "upload.started", "upload_task", task_id, {"filename": payload.filename, "size": payload.total_bytes})
+        return upload_task_public(db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone())
+
+
+@app.post("/api/uploads/{task_id}/file")
+async def upload_chunk(
+    task_id: str,
+    request: Request,
+    x_upload_offset: int = Header(),
+    user: dict = Depends(current_user),
+):
+    chunk = await request.body()
+    if not chunk:
+        raise HTTPException(400, "Chunk tải lên đang trống.")
+    with transaction() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
+        if not task:
+            raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
+        if task["status"] not in {"uploading", "failed"}:
+            raise HTTPException(409, "Tác vụ không còn nhận dữ liệu tải lên.")
+        if x_upload_offset != task["uploaded_bytes"]:
+            raise HTTPException(409, f"Offset không hợp lệ. Máy chủ đang có {task['uploaded_bytes']} byte.")
+        uploaded_bytes = x_upload_offset + len(chunk)
+        if uploaded_bytes > task["total_bytes"]:
+            raise HTTPException(413, "Dữ liệu tải lên vượt quá dung lượng đã khai báo.")
+        path = __import__("pathlib").Path(task["temp_path"])
+        with path.open("r+b") as output:
+            output.seek(x_upload_offset)
+            output.write(chunk)
+        status = "uploaded" if uploaded_bytes == task["total_bytes"] else "uploading"
+        db.execute(
+            "UPDATE upload_tasks SET uploaded_bytes=?,status=?,error=NULL,updated_at=? WHERE id=?",
+            (uploaded_bytes, status, now(), task_id),
+        )
+        return upload_task_public(db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone())
+
+
+@app.post("/api/uploads/{task_id}/analyze", status_code=202)
+def analyze_upload(task_id: str, user: dict = Depends(current_user)):
+    with transaction() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
+        if not task:
+            raise HTTPException(404, "Khong tim thay tac vu tai len.")
+        if task["uploaded_bytes"] != task["total_bytes"]:
+            raise HTTPException(409, "File chua duoc tai len day du.")
+        if task["status"] in {"completed", "processing"}:
+            return upload_task_public(task)
+        create_classification_ticket(db, task, dict(user))
+        result = upload_task_public(db.execute("SELECT * FROM upload_tasks WHERE id=?", (task_id,)).fetchone())
+    return result
+
+
+@app.post("/api/uploads/{task_id}/confirm", status_code=201)
+def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
+    if payload.document_type not in DOCUMENT_TYPES:
+        raise HTTPException(422, "Loai tai lieu khong hop le.")
+    with transaction() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
+        if not task:
+            raise HTTPException(404, "Khong tim thay tac vu tai len.")
+        if task["uploaded_bytes"] != task["total_bytes"]:
+            raise HTTPException(409, "File chua duoc tai len day du.")
+        ticket = db.execute(
+            "SELECT * FROM document_classification_tickets WHERE upload_task_id=? AND user_code=? ORDER BY created_at DESC LIMIT 1",
+            (task_id, user["code"]),
+        ).fetchone()
+        if not ticket:
+            ticket = create_classification_ticket(db, task, dict(user))
+            ticket = db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket["id"],)).fetchone()
+        if ticket["status"] == "CONFIRMED" and ticket["document_id"]:
+            return {"ticket": classification_ticket_public(ticket), "document": dict(db.execute("SELECT * FROM documents WHERE id=?", (ticket["document_id"],)).fetchone())}
+
+        metadata = json.loads(task["metadata"])
+        final_specialization_id = payload.specialization_id
+        final_course_id = payload.course_id
+        final_document_type = payload.document_type
+        selected_node = validate_folder_access(db, user, payload.folder_node_id) if payload.folder_node_id else None
+        if selected_node and selected_node["type"] in {"specialization", "faculty"}:
+            raise HTTPException(400, "Tai lieu phai duoc luu trong hoc phan hoac thu muc loai tai lieu.")
+        if selected_node and selected_node["type"] == "standard_folder":
+            final_document_type = selected_node["name"]
+            final_course_id = selected_node["parent_id"]
+        elif selected_node and selected_node["type"] == "course":
+            final_course_id = selected_node["id"]
+        selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
+        if selected_course:
+            spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
+            specialization = db.execute("SELECT * FROM specializations WHERE folder_node_id=?", (spec_node["id"],)).fetchone() if spec_node else None
+            final_specialization_id = specialization["id"] if specialization else final_specialization_id
+        assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
+        if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
+            raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
+        title = metadata.get("title") or __import__("pathlib").Path(task["filename"]).stem
+        topic = selected_course["name"] if selected_course else metadata.get("topic") or final_document_type
+        raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+        preview = quick_preview_text(task["filename"], task["mime_type"], raw)
+        document_payload = {
+            "title": title,
+            "topic": topic,
+            "doc_type": final_document_type,
+            "document_type": final_document_type,
+            "visibility": payload.visibility,
+            "folder_path": assignment["folder_path"],
+            "folder_node_id": assignment["folder_node_id"],
+            "specialization_id": final_specialization_id,
+            "course_id": final_course_id,
+            "content": f"File: {task['filename']}\nStatus: SAVED. AI processing is waiting in background.\n\n{preview[:4000]}",
+        }
+        existing_id = metadata.get("existing_document_id")
+        if existing_id:
+            document = update_document(db, dict(user), get_active_document(db, existing_id), document_payload, defer_processing=True)
+            version_no = document["current_version"]
+        else:
+            document = create_document(db, dict(user), document_payload, defer_processing=True)
+            version_no = 1
+        asset = save_file_asset(db, document["id"], version_no, task["filename"], task["mime_type"], raw, defer_processing=True)
+        enqueue_processing_jobs(db, document["id"])
+        db.execute(
+            "UPDATE documents SET status='SAVED',specialization_id=?,course_id=?,document_type=?,folder_node_id=?,folder_path=?,updated_at=? WHERE id=?",
+            (final_specialization_id, final_course_id, final_document_type, assignment["folder_node_id"], assignment["folder_path"], now(), document["id"]),
+        )
+        db.execute(
+            "UPDATE document_classification_tickets SET selected_specialization_id=?,selected_course_id=?,selected_document_type=?,selected_visibility=?,status='CONFIRMED',document_id=?,updated_at=? WHERE id=?",
+            (final_specialization_id, final_course_id, final_document_type, payload.visibility, document["id"], now(), ticket["id"]),
+        )
+        db.execute(
+            "UPDATE upload_tasks SET status='processing',document_id=?,error=NULL,updated_at=? WHERE id=?",
+            (document["id"], now(), task_id),
+        )
+        audit(db, user["code"], "upload.confirmed", "document", document["id"], {"ticket_id": ticket["id"], "asset_id": asset["id"]})
+        document = dict(db.execute("SELECT * FROM documents WHERE id=?", (document["id"],)).fetchone())
+        ticket_public = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket["id"],)).fetchone())
+    background_tasks.add_task(process_document_background, document["id"], task_id)
+    return {"ticket": ticket_public, "document": document, "asset": asset}
+
+
+@app.get("/api/uploads")
+def upload_tasks(user: dict = Depends(current_user)):
+    with connection() as db:
+        return [
+            upload_task_public(task)
+            for task in db.execute(
+                "SELECT * FROM upload_tasks WHERE user_code=? ORDER BY created_at DESC LIMIT 20",
+                (user["code"],),
+            ).fetchall()
+        ]
+
+
+@app.get("/api/uploads/{task_id}")
+def upload_status(task_id: str, user: dict = Depends(current_user)):
+    with connection() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
+        if not task:
+            raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
+        return upload_task_public(task)
+
+
+@app.delete("/api/uploads/{task_id}")
+def delete_upload_task(task_id: str, user: dict = Depends(current_user)):
+    with transaction() as db:
+        task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
+        if not task:
+            raise HTTPException(404, "Không tìm thấy tác vụ tải lên.")
+        if task["status"] in {"uploading", "uploaded", "analyzing", "saving_metadata"} and task["uploaded_bytes"] > 0:
+            raise HTTPException(409, "Không thể xóa tác vụ đang xử lý.")
+        temp_path = __import__("pathlib").Path(task["temp_path"])
+        db.execute("DELETE FROM upload_tasks WHERE id=?", (task_id,))
+    if temp_path.exists():
+        temp_path.unlink()
+    return {"status": "deleted", "id": task_id}
 
 
 @app.post("/api/documents/upload", status_code=201)
 async def upload_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_filename: str = Header(),
     x_title: str = Header(),
     x_topic: str = Header(),
     x_doc_type: str = Header(),
     x_visibility: Literal["public", "private"] = Header(),
     x_folder_path: str = Header(default=""),
+    x_folder_node_id: str = Header(default=""),
     user: dict = Depends(current_user),
 ):
     from urllib.parse import unquote
@@ -423,31 +1062,46 @@ async def upload_document(
         raise HTTPException(413, f"File vượt quá giới hạn tải lên {MAX_UPLOAD_BYTES // 1024 // 1024} MB.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
+    doc_type = unquote(x_doc_type)
+    if doc_type not in DOCUMENT_TYPES:
+        doc_type = "Tài liệu khác"
     payload = {
-        "title": unquote(x_title), "topic": unquote(x_topic), "doc_type": unquote(x_doc_type),
-        "visibility": x_visibility, "content": extract_text(filename, mime_type, raw), "folder_path": unquote(x_folder_path) or None,
+        "title": unquote(x_title), "topic": unquote(x_topic), "doc_type": doc_type,
+        "visibility": x_visibility, "content": quick_preview_text(filename, mime_type, raw) or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
+        "folder_path": unquote(x_folder_path) or None, "folder_node_id": x_folder_node_id or None,
     }
     try:
         with transaction() as db:
-            document = create_document(db, user, payload)
-            asset = save_file_asset(db, document["id"], 1, filename, mime_type, raw)
+            suggestion = suggest_upload_destination(db, dict(user), filename, payload["content"])
+            payload["folder_path"] = payload["folder_path"] or suggestion.get("folder_path") or suggest_folder(db, dict(user), payload)
+            document = create_document(db, user, payload, defer_processing=True)
+            asset = save_file_asset(db, document["id"], 1, filename, mime_type, raw, defer_processing=True)
+            enqueue_processing_jobs(db, document["id"])
+            db.execute("UPDATE documents SET status='PROCESSING',updated_at=? WHERE id=?", (now(), document["id"]))
+            set_v2_state(db, document["id"], indexing_status="processing")
             sync_user_document(db, user["code"], document["id"], __import__("pathlib").Path(asset["original_path"]))
             audit(db, user["code"], "file.upload", "document", document["id"], {"filename": filename, "size": len(raw)})
-            return {"document": document, "asset": asset}
+            document = dict(db.execute("SELECT * FROM documents WHERE id=?", (document["id"],)).fetchone())
+        background_tasks.add_task(process_document_background, document["id"], None)
+        return {"document": document, "asset": asset}
     except ValueError as exc:
         raise HTTPException(409, str(exc))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
 
 
 @app.put("/api/documents/{document_id}/upload")
 async def upload_new_version(
     document_id: str,
     request: Request,
+    background_tasks: BackgroundTasks,
     x_filename: str = Header(),
     x_title: str = Header(),
     x_topic: str = Header(),
     x_doc_type: str = Header(),
     x_visibility: Literal["public", "private"] = Header(),
     x_folder_path: str = Header(default=""),
+    x_folder_node_id: str = Header(default=""),
     user: dict = Depends(current_user),
 ):
     from urllib.parse import unquote
@@ -461,17 +1115,28 @@ async def upload_new_version(
         raise HTTPException(413, f"File exceeds the configured {MAX_UPLOAD_BYTES // 1024 // 1024} MB limit.")
     filename = unquote(x_filename)
     mime_type = request.headers.get("content-type", "application/octet-stream")
+    doc_type = unquote(x_doc_type)
+    if doc_type not in DOCUMENT_TYPES:
+        doc_type = "Tài liệu khác"
     payload = {
-        "title": unquote(x_title), "topic": unquote(x_topic), "doc_type": unquote(x_doc_type),
-        "visibility": x_visibility, "content": extract_text(filename, mime_type, raw), "folder_path": unquote(x_folder_path) or None,
+        "title": unquote(x_title), "topic": unquote(x_topic), "doc_type": doc_type,
+        "visibility": x_visibility, "content": quick_preview_text(filename, mime_type, raw) or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
+        "folder_path": unquote(x_folder_path) or None, "folder_node_id": x_folder_node_id or None,
     }
     try:
         with transaction() as db:
-            document = update_document(db, user, get_document(db, document_id), payload)
-            asset = save_file_asset(db, document_id, document["current_version"], filename, mime_type, raw)
+            suggestion = suggest_upload_destination(db, dict(user), filename, payload["content"])
+            payload["folder_path"] = payload["folder_path"] or suggestion.get("folder_path") or suggest_folder(db, dict(user), payload)
+            document = update_document(db, user, get_document(db, document_id), payload, defer_processing=True)
+            asset = save_file_asset(db, document_id, document["current_version"], filename, mime_type, raw, defer_processing=True)
+            enqueue_processing_jobs(db, document_id)
+            db.execute("UPDATE documents SET status='PROCESSING',updated_at=? WHERE id=?", (now(), document_id))
+            set_v2_state(db, document_id, indexing_status="processing")
             sync_user_document(db, user["code"], document_id, __import__("pathlib").Path(asset["original_path"]))
             audit(db, user["code"], "file.upload_version", "document", document_id, {"filename": filename})
-            return {"document": document, "asset": asset}
+            document = dict(db.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone())
+        background_tasks.add_task(process_document_background, document_id, None)
+        return {"document": document, "asset": asset}
     except PermissionError as exc:
         raise HTTPException(403, str(exc))
 
@@ -619,6 +1284,37 @@ def rollback(document_id: str, version_no: int, user: dict = Depends(current_use
 def search(payload: Question, user: dict = Depends(current_user)):
     with transaction() as db:
         return ask(db, user, payload.question)
+
+
+@app.post("/api/search/stream")
+def search_stream(payload: Question, user: dict = Depends(current_user)):
+    def event_stream():
+        yield json.dumps({"type": "status", "message": "Đang tìm trong kho tri thức..."}, ensure_ascii=False) + "\n"
+        try:
+            with transaction() as db:
+                result = ask(db, user, payload.question)
+        except Exception as exc:
+            yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
+            return
+
+        yield json.dumps({"type": "status", "message": "Đang soạn câu trả lời..."}, ensure_ascii=False) + "\n"
+        for chunk in re.findall(r"\S+\s*", result["answer"]):
+            yield json.dumps({"type": "delta", "text": chunk}, ensure_ascii=False) + "\n"
+        yield json.dumps(
+            {
+                "type": "complete",
+                "citations": result["citations"],
+                "scope": result["scope"],
+                "pipeline": result.get("pipeline", []),
+            },
+            ensure_ascii=False,
+        ) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/trash")

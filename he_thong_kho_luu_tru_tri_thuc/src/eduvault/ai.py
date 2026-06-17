@@ -108,6 +108,48 @@ class AIProvider:
         except (RuntimeError, json.JSONDecodeError):
             return fallback
 
+    def policy_tree(self, content: str, fallback: dict) -> dict:
+        if not self.api_key or not content.strip():
+            return fallback
+        instructions = """
+Ban la bo parser Policy cho he thong EduVault. Chi tra JSON hop le, khong markdown.
+Schema bat buoc:
+{
+  "faculty": {"name": "ten khoa", "code": "ma khoa neu co"},
+  "specializations": [
+    {
+      "name": "ten nhom chuyen mon",
+      "description": "",
+      "courses": [
+        {
+          "name": "ten hoc phan",
+          "code": "ma hoc phan neu co",
+          "description": "",
+          "standard_folders": [
+            "De cuong mon hoc",
+            "Bai giang",
+            "Slide",
+            "Lab",
+            "Bai tap",
+            "De thi",
+            "Dap an",
+            "Tai lieu tham khảo"
+          ]
+        }
+      ]
+    }
+  ]
+}
+Khong tao node rong. Khong dat ten node la "Thu muc". Khong tra id ky thuat.
+Neu policy chi co hoc phan ma khong noi ro nhom chuyen mon, hay gom theo nhom chuyen mon gan nhat trong van ban.
+"""
+        try:
+            raw = self._response(instructions, f"Noi dung policy:\n{content[:20000]}")
+            cleaned = re.sub(r"^```json|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+            return {**fallback, **json.loads(cleaned)}
+        except (RuntimeError, json.JSONDecodeError):
+            return fallback
+
     def answer(self, question: str, contexts: list[dict], fallback: str, instructions: str | None = None) -> str:
         if not self.api_key or not contexts:
             return fallback

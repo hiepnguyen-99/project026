@@ -6,7 +6,7 @@ import { DashboardData, formatDate, V2Status } from "@/lib/api";
 import { useBackendData } from "@/lib/hooks";
 import { Bars, Metric, PageHeader, Panel } from "@/components/ui";
 
-const empty: DashboardData = { user: { code:"",name:"",role:"lecturer",department:"" }, stats:{documents:0,private:0,topics:0}, documents:[], requests:[], backups:[], audit:[] };
+const empty: DashboardData = { user: { code:"",name:"",role:"lecturer",department:"",permissions:[] }, stats:{documents:0,private:0,topics:0}, documents:[], requests:[], backups:[], audit:[] };
 const emptyV2: V2Status = { architecture:"v2-hybrid",database:"",ready:false,scope:"single-faculty",capacity_target_gb:100,rpo_target_minutes:60,rto_target_hours:4,services:{},objects:[],outbox:[] };
 
 export default function Dashboard() {

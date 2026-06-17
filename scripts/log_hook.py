@@ -101,10 +101,6 @@ def normalize(data: dict, tool: str) -> dict | None:
         if event == "BeforeAgent":
             prompt = data.get("prompt", "")[:1000]
             base.update({"prompt": prompt})
-        elif event == "AfterAgent":
-            prompt = data.get("prompt", "")[:1000]
-            answer = data.get("prompt_response", "")[:500]
-            base.update({"prompt": prompt, "response_summary": answer})
         else:
             req = data.get("request", {})
             contents = req.get("contents", [])

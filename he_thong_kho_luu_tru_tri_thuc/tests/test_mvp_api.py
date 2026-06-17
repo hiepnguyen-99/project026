@@ -1,8 +1,11 @@
 import tempfile
 import zipfile
 import os
+import json
+from urllib.parse import quote
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -49,6 +52,23 @@ def test_analyze_file_rejects_oversized_input_before_processing():
             main_module.MAX_AI_ANALYZE_BYTES = original_limit
 
 
+def test_login_and_dashboard_return_role_permissions_for_rbac():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            admin_login = client.post("/api/auth/login", json={"code": "ADMIN", "password": "ADMIN"})
+            assert admin_login.status_code == 200
+            assert "policy.manage" in admin_login.json()["user"]["permissions"]
+            assert "users.manage" in admin_login.json()["user"]["permissions"]
+
+            lecturer = login(client, "GV001")
+            dashboard = client.get("/api/dashboard", headers=lecturer)
+            assert dashboard.status_code == 200
+            permissions = dashboard.json()["user"]["permissions"]
+            assert "repository.own" in permissions
+            assert "policy.manage" not in permissions
+
+
 def test_upload_accepts_file_larger_than_ai_analysis_limit():
     with tempfile.TemporaryDirectory() as directory:
         configure_temp_storage(Path(directory))
@@ -77,6 +97,93 @@ def test_upload_accepts_file_larger_than_ai_analysis_limit():
         finally:
             main_module.MAX_AI_ANALYZE_BYTES = original_ai_limit
             main_module.MAX_UPLOAD_BYTES = original_upload_limit
+
+
+def test_chunked_upload_reports_progress_and_processes_in_background():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            raw = b"python code programming lesson"
+            initialized = client.post(
+                "/api/uploads/init",
+                headers=lecturer,
+                json={
+                    "filename": "chunked.txt",
+                    "mime_type": "text/plain",
+                    "total_bytes": len(raw),
+                    "title": "Chunked upload",
+                    "topic": "Upload",
+                    "doc_type": "Demo",
+                    "visibility": "private",
+                },
+            )
+            assert initialized.status_code == 201
+            task_id = initialized.json()["id"]
+
+            first = client.post(
+                f"/api/uploads/{task_id}/file",
+                headers={**lecturer, "X-Upload-Offset": "0", "Content-Type": "application/octet-stream"},
+                content=raw[:8],
+            )
+            assert first.status_code == 200
+            assert first.json()["uploaded_bytes"] == 8
+            assert first.json()["status"] == "uploading"
+
+            final = client.post(
+                f"/api/uploads/{task_id}/file",
+                headers={**lecturer, "X-Upload-Offset": "8", "Content-Type": "application/octet-stream"},
+                content=raw[8:],
+            )
+            assert final.status_code == 200
+            assert final.json()["uploaded_bytes"] == len(raw)
+            assert final.json()["status"] == "uploaded"
+
+            analyzed = client.post(f"/api/uploads/{task_id}/analyze", headers=lecturer)
+            assert analyzed.status_code == 202
+            status = client.get(f"/api/uploads/{task_id}", headers=lecturer).json()
+            assert status["status"] == "pending_confirmation"
+            assert not status["document_id"]
+            ticket = status["metadata"]["classification_ticket"]
+            assert ticket["filename"] == "chunked.txt"
+            assert ticket["status"] == "PENDING_CONFIRMATION"
+
+            confirmed = client.post(
+                f"/api/uploads/{task_id}/confirm",
+                headers=lecturer,
+                json={"specialization_id": None, "course_id": None, "document_type": "Tài liệu khác", "visibility": "private"},
+            )
+            assert confirmed.status_code == 201
+            document_id = confirmed.json()["document"]["id"]
+            document = client.get(f"/api/documents/{document_id}", headers=lecturer)
+            assert document.status_code == 200
+            assert document.json()["document_type"] == "Tài liệu khác"
+
+
+def test_upload_with_long_folder_and_filename_stays_windows_safe():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            long_name = "OceanofPDF.com_AI_Engineering_Building_Applications_Chip_Huyen_" * 3 + ".pdf"
+            uploaded = client.post(
+                "/api/documents/upload",
+                headers={
+                    **lecturer,
+                    "X-Filename": quote(long_name),
+                    "X-Title": "Long path",
+                    "X-Topic": quote("Kỹ thuật AI xây dựng ứng dụng với mô hình nền tảng triển khai đánh giá hệ thống AI"),
+                    "X-Doc-Type": "sach_hoc_thuat",
+                    "X-Visibility": "public",
+                    "X-Folder-Path": quote("Công nghệ thông tin/Kỹ thuật AI xây dựng ứng dụng với mô hình nền tảng triển khai đánh giá hệ thống AI/sach_hoc_thuat/public"),
+                    "Content-Type": "application/pdf",
+                },
+                content=b"%PDF-long-path",
+            )
+            assert uploaded.status_code == 201
+            asset_path = Path(uploaded.json()["asset"]["original_path"])
+            assert asset_path.exists()
+            assert len(str(asset_path)) < 260
 
 
 def test_mvp_auth_permissions_versioning_and_backup():
@@ -412,6 +519,57 @@ def test_private_owner_anonymity_and_strict_chatbot_scope():
             ]
 
 
+def test_chatbot_stream_emits_status_deltas_and_citations():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            response = client.post(
+                "/api/search/stream",
+                headers=lecturer,
+                json={"question": "Tài liệu học máy nói về nội dung gì?"},
+            )
+
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("application/x-ndjson")
+            events = [json.loads(line) for line in response.text.splitlines()]
+            assert events[0]["type"] == "status"
+            assert any(event["type"] == "delta" and event["text"] for event in events)
+            assert events[-1]["type"] == "complete"
+            assert "citations" in events[-1]
+
+
+def test_chatbot_book_request_does_not_cite_exam_documents():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            exam = client.post(
+                "/api/documents",
+                headers=lecturer,
+                json={
+                    "title": "Đề thi AI cuối kỳ",
+                    "doc_type": "Đề thi",
+                    "topic": "Trí tuệ nhân tạo",
+                    "visibility": "public",
+                    "content": "Đề thi môn AI có câu hỏi về machine learning và trí tuệ nhân tạo.",
+                },
+            )
+            assert exam.status_code == 201
+
+            answer = client.post(
+                "/api/search",
+                headers=lecturer,
+                json={"question": "Tôi cần sách AI bạn hãy gợi ý cho tôi"},
+            )
+
+            assert answer.status_code == 200
+            result = answer.json()
+            assert all(item["id"] != exam.json()["id"] for item in result["citations"])
+            assert "sách AI" in result["answer"]
+            assert "chưa tìm thấy" in result["answer"].lower()
+
+
 def test_private_file_requires_owner_approval_before_download():
     with tempfile.TemporaryDirectory() as directory:
         configure_temp_storage(Path(directory))
@@ -494,6 +652,49 @@ def test_personal_cloud_connections_are_scoped_per_user():
             assert disconnected.status_code == 200
 
 
+def test_manual_cloud_sync_uses_original_file_for_current_version():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            uploaded = client.post(
+                "/api/documents/upload",
+                headers={
+                    **lecturer,
+                    "X-Filename": "syllabus.pdf",
+                    "X-Title": "Cloud sync PDF",
+                    "X-Topic": "Cloud",
+                    "X-Doc-Type": "Syllabus",
+                    "X-Visibility": "private",
+                    "Content-Type": "application/pdf",
+                },
+                content=b"%PDF-1.4 original-pdf",
+            )
+            assert uploaded.status_code == 201
+            document_id = uploaded.json()["document"]["id"]
+
+            with database.transaction() as db:
+                db.execute(
+                    """INSERT INTO cloud_connections(user_code,provider,account_email,access_token,refresh_token,expires_in,status,created_at,updated_at)
+                       VALUES('GV001','google_drive','gv001@example.edu','','',0,'connected',?,?)""",
+                    (database.now(), database.now()),
+                )
+
+            synced_sources = []
+
+            def capture_sync(db, user_code, synced_document_id, source, provider=None):
+                synced_sources.append((synced_document_id, source, provider))
+                return [{"provider": provider, "status": "success", "remote": "google-drive:test"}]
+
+            with patch.object(main_module, "sync_user_document", side_effect=capture_sync):
+                response = client.post("/api/cloud/connections/google_drive/sync", headers=lecturer)
+
+            assert response.status_code == 200
+            source = next(source for item_id, source, _ in synced_sources if item_id == document_id)
+            assert source.suffix == ".pdf"
+            assert source.read_bytes() == b"%PDF-1.4 original-pdf"
+
+
 def test_v2_object_refs_outbox_and_exam_publication_policy():
     with tempfile.TemporaryDirectory() as directory:
         configure_temp_storage(Path(directory))
@@ -523,7 +724,7 @@ def test_v2_object_refs_outbox_and_exam_publication_policy():
             assert status.json()["objects"]
             assert status.json()["outbox"]
 
-            assert client.get(f"/api/documents/{document_id}", headers=head).status_code == 200
+            assert client.get(f"/api/documents/{document_id}", headers=head).status_code == 403
             assert client.get(f"/api/documents/{document_id}", headers=admin).status_code == 403
 
             schedule = client.post(
@@ -538,3 +739,243 @@ def test_v2_object_refs_outbox_and_exam_publication_policy():
             assert published.status_code == 200
             assert document_id in published.json()["documents"]
             assert client.get(f"/api/documents/{document_id}", headers=admin).status_code == 200
+
+
+def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            admin = login(client, "ADMIN")
+            lecturer = login(client, "GV001")
+
+            policy_payload = {
+                "faculty": "Khoa CNTT",
+                "specializations": [
+                    {
+                        "name": "Tri tue nhan tao",
+                        "courses": [
+                            {"name": "AI Application", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+                            {"name": "Machine Learning", "standard_folders": ["De cuong", "Bai giang", "Lab", "De thi"]},
+                        ],
+                    },
+                    {
+                        "name": "Data Science",
+                        "courses": [{"name": "Data Mining", "standard_folders": ["De cuong", "Lab", "De thi"]}],
+                    },
+                ],
+            }
+            uploaded = client.post(
+                "/api/policies/upload",
+                headers={**admin, "X-Filename": "policy.json", "X-Title": "Policy hoc lieu CNTT", "Content-Type": "application/json"},
+                content=json.dumps(policy_payload).encode(),
+            )
+            assert uploaded.status_code == 201
+            assert uploaded.json()["status"] == "draft"
+            draft_to_delete = client.post(
+                "/api/policies/upload",
+                headers={**admin, "X-Filename": "delete-policy.json", "X-Title": "Policy xoa thu", "Content-Type": "application/json"},
+                content=json.dumps(policy_payload).encode(),
+            )
+            assert draft_to_delete.status_code == 201
+            deleted_draft = client.delete(f"/api/policies/{draft_to_delete.json()['id']}", headers=admin)
+            assert deleted_draft.status_code == 200
+            assert deleted_draft.json()["status"] == "deleted"
+
+            activated = client.post(f"/api/policies/{uploaded.json()['id']}/activate", headers=admin)
+            assert activated.status_code == 200
+            assert activated.json()["status"] == "active"
+            delete_active = client.delete(f"/api/policies/{uploaded.json()['id']}", headers=admin)
+            assert delete_active.status_code == 400
+
+            master = client.get("/api/admin/master-tree", headers=admin)
+            assert master.status_code == 200
+            spec_names = [node["name"] for node in master.json()["tree"]["children"]]
+            assert master.json()["tree"]["name"] == "Khoa CNTT"
+            assert spec_names == ["Data Science", "Tri tue nhan tao"]
+            ai_master = next(node for node in master.json()["tree"]["children"] if node["name"] == "Tri tue nhan tao")
+            assert [node["type"] for node in ai_master["children"]] == ["course", "course"]
+            assert next(node for node in ai_master["children"] if node["name"] == "AI Application")["children"][0]["type"] == "standard_folder"
+
+            master_alias = client.get("/master-tree", headers=admin)
+            assert master_alias.status_code == 200
+            assert master_alias.json()[0]["name"] == "Khoa CNTT"
+            api_master_alias = client.get("/api/master-folder-tree", headers=admin)
+            assert api_master_alias.status_code == 200
+            assert api_master_alias.json()[0]["children"][0]["type"] == "specialization"
+
+            specializations = client.get("/api/specializations", headers=lecturer)
+            assert specializations.status_code == 200
+            ai_summary = next(item for item in specializations.json() if item["name"] == "Tri tue nhan tao")
+            assert ai_summary["courses_count"] == 2
+
+            profile = client.get("/api/profile/specializations", headers=lecturer)
+            assert profile.status_code == 200
+            ai_spec = next(item for item in profile.json()["available"] if item["name"] == "Tri tue nhan tao")
+            ds_spec = next(item for item in profile.json()["available"] if item["name"] == "Data Science")
+
+            empty_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
+            assert empty_tree["children"] == []
+            assert "chua chon" in empty_tree["message"]
+
+            selected = client.put("/api/profile/specializations", headers=lecturer, json={"specialization_ids": [ai_spec["id"]]})
+            assert selected.status_code == 200
+            assert selected.json()["selected_ids"] == [ai_spec["id"]]
+
+            my_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
+            assert [node["name"] for node in my_tree["children"]] == ["Tri tue nhan tao"]
+            ai_course = next(child for child in my_tree["children"][0]["children"] if child["name"] == "AI Application")
+            ai_lab = next(child for child in ai_course["children"] if child["name"] == "Lab")
+            ai_exam = next(child for child in ai_course["children"] if child["name"] == "De thi")
+
+            virtual_alias = client.get("/virtual-tree/GV001", headers=lecturer)
+            assert virtual_alias.status_code == 200
+            assert virtual_alias.json()[0]["name"] == "Tri tue nhan tao"
+
+            lecturer_tree = client.get("/api/lecturers/GV001/folder-tree", headers=lecturer)
+            assert lecturer_tree.status_code == 200
+            assert lecturer_tree.json()[0]["name"] == "Kho của tôi"
+            assert lecturer_tree.json()[0]["children"][0]["name"] == "Tri tue nhan tao"
+
+            repeat_selection = client.post(
+                "/api/lecturers/GV001/specializations",
+                headers=lecturer,
+                json={"specialization_ids": [ai_spec["id"]]},
+            )
+            assert repeat_selection.status_code == 200
+            with database.connection() as db:
+                active_clones = db.execute(
+                    "SELECT COUNT(*) count FROM lecturer_folder_nodes WHERE user_code='GV001' AND status='active'"
+                ).fetchone()["count"]
+            repeat_tree = client.get("/api/lecturers/GV001/folder-tree", headers=lecturer).json()
+            assert active_clones == 1 + 2 + 8
+            assert repeat_tree[0]["children"][0]["children"][0]["children"][0]["type"] == "folder"
+
+            forbidden = client.post(
+                "/api/documents/upload",
+                headers={
+                    **lecturer,
+                    "X-Filename": "ml.txt",
+                    "X-Title": "ML forbidden",
+                    "X-Topic": "Data Mining",
+                    "X-Doc-Type": "Lab",
+                    "X-Visibility": "public",
+                    "X-Folder-Node-Id": ds_spec["folder_node_id"],
+                    "Content-Type": "text/plain",
+                },
+                content=b"cannot upload here",
+            )
+            assert forbidden.status_code == 403
+
+            allowed = client.post(
+                "/api/documents/upload",
+                headers={
+                    **lecturer,
+                    "X-Filename": "ai_lab.txt",
+                    "X-Title": "AI lab allowed",
+                    "X-Topic": "AI Application",
+                    "X-Doc-Type": "Lab",
+                    "X-Visibility": "public",
+                    "X-Folder-Node-Id": ai_lab["id"],
+                    "Content-Type": "text/plain",
+                },
+                content=b"allowed ai lab upload",
+            )
+            assert allowed.status_code == 201
+            assert allowed.json()["document"]["folder_node_id"] == ai_lab["id"]
+
+            course_level_upload = client.post(
+                "/api/documents/upload",
+                headers={
+                    **lecturer,
+                    "X-Filename": "ai_reference.txt",
+                    "X-Title": "AI reference book",
+                    "X-Topic": "AI Application",
+                    "X-Doc-Type": "Slide",
+                    "X-Visibility": "public",
+                    "X-Folder-Node-Id": ai_course["id"],
+                    "Content-Type": "text/plain",
+                },
+                content=b"reference book for ai application",
+            )
+            assert course_level_upload.status_code == 201
+            course_level_doc = course_level_upload.json()["document"]
+            assert course_level_doc["folder_node_id"] != ai_course["id"]
+            with database.connection() as db:
+                destination = db.execute(
+                    "SELECT * FROM folder_nodes WHERE id=?",
+                    (course_level_doc["folder_node_id"],),
+                ).fetchone()
+            assert destination["type"] == "standard_folder"
+            assert destination["parent_id"] == ai_course["id"]
+            assert destination["name"] == "Slide"
+
+            with database.connection() as db:
+                db.execute(
+                    "UPDATE documents SET folder_node_id=?,folder_path=?,doc_type=?,document_type=? WHERE id=?",
+                    (ai_course["id"], ai_course["path"], "Lab", "Lab", allowed.json()["document"]["id"]),
+                )
+                database.migrate_document_type_folder_placement(db)
+                migrated = db.execute(
+                    "SELECT d.folder_node_id,n.type,n.parent_id,n.name FROM documents d JOIN folder_nodes n ON n.id=d.folder_node_id WHERE d.id=?",
+                    (allowed.json()["document"]["id"],),
+                ).fetchone()
+            assert migrated["type"] == "standard_folder"
+            assert migrated["parent_id"] == ai_course["id"]
+            assert migrated["name"] == "Lab"
+
+            raw = b"Machine Learning final review and model evaluation"
+            initialized = client.post(
+                "/api/uploads/init",
+                headers=lecturer,
+                json={
+                    "filename": "machine-learning-review.txt",
+                    "mime_type": "text/plain",
+                    "total_bytes": len(raw),
+                    "title": "Manual destination wins",
+                    "topic": "Machine Learning",
+                    "doc_type": "Slide",
+                    "visibility": "public",
+                },
+            )
+            assert initialized.status_code == 201
+            task_id = initialized.json()["id"]
+            uploaded_file = client.post(
+                f"/api/uploads/{task_id}/file",
+                headers={**lecturer, "X-Upload-Offset": "0", "Content-Type": "application/octet-stream"},
+                content=raw,
+            )
+            assert uploaded_file.status_code == 200
+            analyzed = client.post(f"/api/uploads/{task_id}/analyze", headers=lecturer)
+            assert analyzed.status_code == 202
+            ticket = client.get(f"/api/uploads/{task_id}", headers=lecturer).json()["metadata"]["classification_ticket"]
+            assert ticket["suggested_course"] == "Machine Learning"
+            confirmed_manual = client.post(
+                f"/api/uploads/{task_id}/confirm",
+                headers=lecturer,
+                json={
+                    "specialization_id": ticket["suggested_specialization_id"],
+                    "course_id": ticket["suggested_course_id"],
+                    "folder_node_id": ai_exam["id"],
+                    "document_type": "Slide",
+                    "visibility": "public",
+                },
+            )
+            assert confirmed_manual.status_code == 201
+            manual_document = confirmed_manual.json()["document"]
+            assert manual_document["folder_node_id"] == ai_exam["id"]
+            assert manual_document["course_id"] == ai_course["id"]
+            assert manual_document["document_type"] == "De thi"
+
+            both = client.put(
+                "/api/profile/specializations",
+                headers=lecturer,
+                json={"specialization_ids": [ai_spec["id"], ds_spec["id"]]},
+            )
+            assert both.status_code == 200
+            expanded_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
+            assert [node["name"] for node in expanded_tree["children"]] == ["Data Science", "Tri tue nhan tao"]
+
+            removed = client.put("/api/profile/specializations", headers=lecturer, json={"specialization_ids": [ds_spec["id"]]})
+            assert removed.status_code == 200
+            reduced_tree = client.get("/api/my-folder-tree", headers=lecturer).json()
+            assert [node["name"] for node in reduced_tree["children"]] == ["Data Science"]

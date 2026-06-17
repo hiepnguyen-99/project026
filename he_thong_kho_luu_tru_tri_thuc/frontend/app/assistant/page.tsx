@@ -4,10 +4,17 @@ import Link from "next/link";
 import { Fragment, ReactNode, useState } from "react";
 import { Bot, FileText, LoaderCircle, MessageSquare, Plus, Send, Sparkles } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
+import { API_URL } from "@/lib/api";
 import { PageHeader, Panel } from "@/components/ui";
 
 type Citation = { id: string; title: string; topic: string; version: number; visibility: string };
 type Answer = { answer: string; citations: Citation[]; scope: string };
+type Conversation = { question: string; result: Answer; status?: string; streaming?: boolean };
+type StreamEvent =
+  | { type: "status"; message: string }
+  | { type: "delta"; text: string }
+  | { type: "complete"; citations: Citation[]; scope: string }
+  | { type: "error"; message: string };
 
 function InlineMarkdown({ text }: { text: string }) {
   const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
@@ -52,48 +59,89 @@ function FriendlyAnswer({ answer }: { answer: string }) {
 
 function Sources({ citations }: { citations: Citation[] }) {
   if (!citations.length) return null;
-  return (
-    <div className="mt-5 border-t border-[var(--border)] pt-4">
-      <p className="mb-3 flex items-center gap-2 text-xs font-bold">
-        <FileText className="text-blue-600" size={15} /> Nguồn tham khảo
-      </p>
-
-      <div className="grid gap-2 sm:grid-cols-2">
-        {citations.map((item) => (
-          <Link
-            href={`/documents/${item.id}`}
-            key={item.id}
-            className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 transition hover:border-blue-300 hover:bg-blue-50/40"
-          >
-            <strong className="block text-xs">{item.title}</strong>
-            <span className="muted mt-1 block text-[10px]">
-              {item.topic} · phiên bản {item.version}
-            </span>
-          </Link>
-        ))}
-      </div>
-    </div>
-  );
+  return <div className="mt-5 border-t border-[var(--border)] pt-4">
+    <p className="mb-3 flex items-center gap-2 text-xs font-bold"><FileText className="text-blue-600" size={15}/>📄 Nguồn tham khảo</p>
+    <div className="grid gap-2 sm:grid-cols-2">{citations.map(item => <Link href={`/documents/${item.id}`} key={item.id} className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 transition hover:border-blue-300 hover:bg-blue-50/40">
+      <strong className="block text-xs">{item.title}</strong>
+      <span className="muted mt-1 block text-[10px]">{item.topic} · phiên bản {item.version}</span>
+    </Link>)}</div>
+  </div>;
 }
 
 export default function Assistant() {
-  const { request } = useAuth();
+  const { token } = useAuth();
   const [question, setQuestion] = useState("");
-  const [history, setHistory] = useState<{ question: string; result: Answer }[]>([]);
+  const [history, setHistory] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  function updateConversation(index: number, update: (item: Conversation) => Conversation) {
+    setHistory(items => items.map((item, itemIndex) => itemIndex === index ? update(item) : item));
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (!question.trim()) return;
+    const submittedQuestion = question.trim();
+    if (!submittedQuestion || loading) return;
+    const conversationIndex = history.length;
+    setHistory(items => [...items, {
+      question: submittedQuestion,
+      result: { answer: "", citations: [], scope: "public_or_owned" },
+      status: "Đang kết nối với trợ lý...",
+      streaming: true,
+    }]);
+    setQuestion("");
     setLoading(true);
     setError("");
     try {
-      const result = await request<Answer>("/api/search", { method: "POST", body: JSON.stringify({ question }) });
-      setHistory(items => [...items, { question, result }]);
-      setQuestion("");
+      const response = await fetch(`${API_URL}/api/search/stream`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ question: submittedQuestion }),
+      });
+      if (!response.ok || !response.body) throw new Error(`Máy chủ trả về lỗi HTTP ${response.status}.`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = done ? "" : lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const streamEvent = JSON.parse(line) as StreamEvent;
+          if (streamEvent.type === "status") {
+            updateConversation(conversationIndex, item => ({ ...item, status: streamEvent.message }));
+          } else if (streamEvent.type === "delta") {
+            updateConversation(conversationIndex, item => ({
+              ...item,
+              status: "",
+              result: { ...item.result, answer: item.result.answer + streamEvent.text },
+            }));
+            await new Promise(resolve => setTimeout(resolve, 18));
+          } else if (streamEvent.type === "complete") {
+            updateConversation(conversationIndex, item => ({
+              ...item,
+              streaming: false,
+              status: "",
+              result: { ...item.result, citations: streamEvent.citations, scope: streamEvent.scope },
+            }));
+          } else if (streamEvent.type === "error") {
+            throw new Error(streamEvent.message);
+          }
+        }
+        if (done) break;
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Không thể hỏi trợ lý.");
+      updateConversation(conversationIndex, item => ({
+        ...item,
+        streaming: false,
+        status: "",
+        result: { ...item.result, answer: item.result.answer || (err instanceof Error ? err.message : "Không thể hỏi trợ lý.") },
+      }));
     } finally {
       setLoading(false);
     }
@@ -113,9 +161,9 @@ export default function Assistant() {
             {history.map((item, index) => <div key={index} className="space-y-4">
               <div className="ml-auto max-w-[80%] rounded-xl rounded-tr-sm bg-blue-600 p-4 text-sm text-white">{item.question}</div>
               <div className="max-w-[95%] rounded-xl rounded-tl-sm bg-[var(--soft)] p-5 text-sm">
-                <div className="mb-4 flex items-center gap-2 font-bold text-blue-600"><Sparkles size={16}/>Mình đã tìm thấy nội dung phù hợp</div>
-                <FriendlyAnswer answer={item.result.answer}/>
-                <Sources citations={item.result.citations}/>
+                <div className="mb-4 flex items-center gap-2 font-bold text-blue-600"><Sparkles size={16}/>{item.streaming ? item.status || "Đang trả lời..." : "Mình đã tìm thấy nội dung phù hợp"}</div>
+                {item.result.answer ? <div><FriendlyAnswer answer={item.result.answer}/>{item.streaming && <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-blue-600 align-middle"/>}</div> : <div className="flex items-center gap-2 text-xs text-[var(--muted)]"><LoaderCircle className="animate-spin" size={14}/>{item.status}</div>}
+                {!item.streaming && <Sources citations={item.result.citations}/>}
               </div>
             </div>)}
           </div>

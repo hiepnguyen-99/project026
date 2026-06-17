@@ -20,13 +20,14 @@ export const transfers = [
 ];
 
 export const navItems = [
-  ["Tổng quan", "/"],
-  ["Kho tài liệu", "/repository"],
-  ["Trợ lý tri thức", "/assistant"],
-  ["Chuyển giao tri thức", "/knowledge-transfer"],
-  ["Quản lý phiên bản", "/versions"],
-  ["Sao lưu & phục hồi", "/backup"],
-  ["Phân quyền", "/permissions"],
-  ["Báo cáo", "/reports"],
-  ["Cài đặt", "/settings"],
+  ["Tổng quan", "/", null],
+  ["Kho tài liệu", "/repository", null],
+  ["Trợ lý tri thức", "/assistant", null],
+  ["Chuyển giao tri thức", "/knowledge-transfer", null],
+  ["Quản lý phiên bản", "/versions", null],
+  ["Sao lưu & phục hồi", "/backup", null],
+  ["Phân quyền", "/permissions", null],
+  ["Báo cáo", "/reports", null],
+  ["Quản lý tài khoản", "/users", "admin"],
+  ["Cài đặt", "/settings", null],
 ] as const;

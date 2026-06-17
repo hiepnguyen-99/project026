@@ -15,7 +15,7 @@ type Comparison={
   changes:{kind:"added"|"removed"|"unchanged";content:string}[];
 };
 
-const empty:DashboardData={user:{code:"",name:"",role:"lecturer",department:""},stats:{documents:0,private:0,topics:0},documents:[],requests:[],backups:[],audit:[]};
+const empty:DashboardData={user:{code:"",name:"",role:"lecturer",department:"",permissions:[]},stats:{documents:0,private:0,topics:0},documents:[],requests:[],backups:[],audit:[]};
 const emptyComparison:Comparison={base_version:0,target_version:0,stats:{added:0,removed:0,unchanged:0},changes:[]};
 
 export default function Versions(){
