@@ -4,7 +4,7 @@ import {
   Languages, LoaderCircle, MessageSquareText, Send, Sparkles,
 } from "lucide-react";
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
 import { API_URL, Document, formatDate } from "@/lib/api";
@@ -51,7 +51,7 @@ function CitationToggle({ citations }: { citations: Citation[] }) {
       {open && (
         <div className="mt-3 space-y-1">
           {citations.map(c => (
-            <Link key={c.id} href={`/documents/${c.id}`} className="flex items-center gap-1.5 text-xs text-blue-600 hover:underline">
+            <Link key={c.id} href={`/documents/${c.id}#pdf`} className="flex items-center gap-1.5 text-xs text-blue-600 hover:underline">
               <FileText size={11}/>{c.title}
             </Link>
           ))}
@@ -90,6 +90,10 @@ export default function DocumentViewer() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState("");
   const [convId, setConvId] = useState<string | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [pdfName, setPdfName] = useState<string>("");
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfError, setPdfError] = useState<string>("");
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
   async function askAI(action: string, prompt: string) {
@@ -148,6 +152,57 @@ export default function DocumentViewer() {
     const a = document.createElement("a"); a.href = url; a.download = name; a.click();
     URL.revokeObjectURL(url);
   }
+
+  useEffect(() => {
+    let revoked = false;
+    let currentUrl: string | null = null;
+    if (!token) return;
+    async function loadPdf() {
+      setPdfError("");
+
+      // chọn file pdf mới nhất (ưu tiên version_no cao, hoặc created_at nếu bạn muốn)
+      const pdf = [...(data.files || [])]
+        .filter(f => (f.mime_type || "").toLowerCase().includes("pdf") || (f.original_name || "").toLowerCase().endsWith(".pdf"))
+        .sort((a, b) => (b.version_no ?? 0) - (a.version_no ?? 0))[0];
+
+      if (!pdf) {
+        // không có pdf -> dọn state
+        setPdfUrl(null);
+        setPdfName("");
+        return;
+      }
+
+      setPdfLoading(true);
+      setPdfName(pdf.original_name || "document.pdf");
+
+      try {
+        const r = await fetch(`${API_URL}/api/files/${pdf.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (!r.ok) throw new Error(`Không tải được PDF (HTTP ${r.status})`);
+
+        const blob = await r.blob();
+        currentUrl = URL.createObjectURL(blob);
+
+        if (!revoked) setPdfUrl(currentUrl);
+      } catch (e) {
+        if (!revoked) setPdfError(e instanceof Error ? e.message : "Không tải được PDF");
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = null;
+        if (!revoked) setPdfUrl(null);
+      } finally {
+        if (!revoked) setPdfLoading(false);
+      }
+    }
+
+    loadPdf();
+
+    return () => {
+      revoked = true;
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+    };
+  }, [data.files, token]);
 
   if (error) return (
     <div>
@@ -317,6 +372,27 @@ export default function DocumentViewer() {
             <p className="muted mt-4 text-[10px] text-center">Cuộc trò chuyện sẽ được lưu vào lịch sử Trợ lý AI</p>
           </div>
         </Panel>
+      </div>
+      {/* PDF viewer at end of page */}
+      <div id="pdf" className="mt-6 app-card p-4">
+        <h3 className="section-title">PDF</h3>
+
+        {pdfLoading && <p className="muted text-xs mt-2">Đang tải PDF…</p>}
+        {pdfError && <p className="text-xs mt-2 text-red-600">{pdfError}</p>}
+
+        {!pdfLoading && !pdfError && !pdfUrl && (
+          <p className="muted text-xs mt-2">Tài liệu này không có tệp PDF.</p>
+        )}
+
+        {pdfUrl && (
+          <div className="mt-3">
+            <p className="muted text-[11px] mb-2">Đang xem: {pdfName}</p>
+            <iframe
+              src={pdfUrl}
+              className="w-full h-[85vh] rounded-md border border-[var(--border)] bg-white"
+            />
+          </div>
+        )}
       </div>
     </div>
   );

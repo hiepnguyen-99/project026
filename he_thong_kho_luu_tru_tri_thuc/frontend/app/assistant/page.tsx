@@ -77,7 +77,9 @@ function DocModal({ doc, token, onClose }: { doc: DocPreview; token: string; onC
         <div className="flex items-start justify-between gap-3 border-b border-[var(--border)] p-4">
           <div><p className="eyebrow">Xem nội dung tài liệu</p><h2 className="mt-0.5 text-base font-bold">{doc.title}</h2></div>
           <div className="flex shrink-0 items-center gap-2">
-            <Link href={`/documents/${doc.id}`} className="btn-secondary text-xs flex items-center gap-1"><ExternalLink size={13}/>Mở trang chi tiết</Link>
+            <Link href={`/documents/${doc.id}#pdf`} className="btn-secondary text-xs flex items-center gap-1">
+              <ExternalLink size={13}/>Mở trang chi tiết
+            </Link>
             <button className="icon-btn" onClick={onClose}><X size={17}/></button>
           </div>
         </div>
@@ -116,7 +118,13 @@ function Sources({ citations, onPreview }: { citations: Citation[]; onPreview?: 
               <div className="mt-2 flex gap-2">
                 {onPreview && <button onClick={() => onPreview(item.id, item.title)} className="flex items-center gap-1 text-[11px] font-bold text-blue-600 hover:underline"><FileText size={11}/>Xem nội dung</button>}
                 {onPreview && <span className="text-[var(--border)]">·</span>}
-                <Link href={`/documents/${item.id}`} className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"><ExternalLink size={11}/>Chi tiết</Link>
+                <Link
+                  href={`/documents/${item.id}#pdf`}
+                  className="flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-blue-600"
+                >
+                  <ExternalLink size={11} />
+                  Chi tiết
+                </Link>
               </div>
             </div>
           ))}
