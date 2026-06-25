@@ -12,6 +12,14 @@ def _enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def qdrant_enabled() -> bool:
+    return _enabled("QDRANT_ENABLED")
+
+
+def qdrant_collection_name(vector_size: int) -> str:
+    return f"{os.getenv('QDRANT_COLLECTION', 'eduvault_chunks')}_{vector_size}"
+
+
 def object_storage_status() -> dict:
     configured = _enabled("MINIO_ENABLED")
     if not configured:
@@ -25,17 +33,34 @@ def object_storage_status() -> dict:
 
 
 def vector_store_status() -> dict:
-    configured = _enabled("QDRANT_ENABLED")
+    configured = qdrant_enabled()
+    prefix = os.getenv("QDRANT_COLLECTION", "eduvault_chunks")
     if not configured:
-        return {"provider": "mysql-sqlite-fallback", "configured": False, "available": True}
+        return {"provider": "mysql-sqlite-fallback", "configured": False, "available": True, "collection_prefix": prefix}
     try:
         from qdrant_client import QdrantClient
 
         client = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"), timeout=2)
-        client.get_collections()
-        return {"provider": "qdrant", "configured": True, "available": True}
+        collections = [
+            item.name for item in client.get_collections().collections
+            if item.name == prefix or item.name.startswith(f"{prefix}_")
+        ]
+        vector_count = 0
+        for collection in collections:
+            try:
+                vector_count += int(client.count(collection_name=collection, exact=True).count)
+            except Exception:
+                pass
+        return {
+            "provider": "qdrant",
+            "configured": True,
+            "available": True,
+            "collection_prefix": prefix,
+            "collections": collections,
+            "vector_count": vector_count,
+        }
     except Exception as exc:
-        return {"provider": "qdrant", "configured": True, "available": False, "detail": str(exc)}
+        return {"provider": "qdrant", "configured": True, "available": False, "collection_prefix": prefix, "detail": str(exc)}
 
 
 def queue_status() -> dict:
@@ -113,14 +138,14 @@ def delete_object(object_uri: str) -> None:
 
 
 def upsert_vector(chunk_id: str, vector: list[float], payload: dict) -> bool:
-    if not _enabled("QDRANT_ENABLED"):
+    if not qdrant_enabled():
         return False
     try:
         from qdrant_client import QdrantClient
         from qdrant_client.models import Distance, PointStruct, VectorParams
 
         client = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"), timeout=5)
-        collection = f"{os.getenv('QDRANT_COLLECTION', 'eduvault_chunks')}_{len(vector)}"
+        collection = qdrant_collection_name(len(vector))
         existing = {item.name for item in client.get_collections().collections}
         if collection not in existing:
             client.create_collection(collection, vectors_config=VectorParams(size=len(vector), distance=Distance.COSINE))
@@ -131,8 +156,51 @@ def upsert_vector(chunk_id: str, vector: list[float], payload: dict) -> bool:
         return False
 
 
+def search_vectors(vector: list[float], user_code: str, limit: int = 100) -> list[dict]:
+    if not qdrant_enabled():
+        return []
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    client = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"), timeout=5)
+    collection = qdrant_collection_name(len(vector))
+    existing = {item.name for item in client.get_collections().collections}
+    if collection not in existing:
+        return []
+    query_filter = Filter(
+        must=[
+            FieldCondition(key="status", match=MatchValue(value="INDEXED")),
+            FieldCondition(key="is_deleted", match=MatchValue(value=False)),
+        ],
+        should=[
+            FieldCondition(key="visibility", match=MatchValue(value="public")),
+            FieldCondition(key="owner_code", match=MatchValue(value=user_code)),
+        ],
+    )
+    try:
+        points = client.search(
+            collection_name=collection,
+            query_vector=vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+    except AttributeError:
+        points = client.query_points(
+            collection_name=collection,
+            query=vector,
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        ).points
+    return [
+        {"score": float(getattr(point, "score", 0.0) or 0.0), "payload": dict(getattr(point, "payload", None) or {})}
+        for point in points
+    ]
+
+
 def delete_vectors(document_id: str) -> None:
-    if not _enabled("QDRANT_ENABLED"):
+    if not qdrant_enabled():
         return
     try:
         from qdrant_client import QdrantClient
@@ -169,7 +237,7 @@ def _minio_client():
 
     return Minio(
         os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000"),
-        access_key=os.getenv("MINIO_ACCESS_KEY", "eduvault"),
-        secret_key=os.getenv("MINIO_SECRET_KEY", "eduvault-demo-secret"),
+        access_key=database.required_secret("MINIO_ACCESS_KEY"),
+        secret_key=database.required_secret("MINIO_SECRET_KEY"),
         secure=_enabled("MINIO_SECURE"),
     )

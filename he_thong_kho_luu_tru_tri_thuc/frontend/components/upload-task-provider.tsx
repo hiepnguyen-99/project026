@@ -1,7 +1,6 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronUp, LoaderCircle, RefreshCw, Trash2, UploadCloud, XCircle } from "lucide-react";
 import { useAuth } from "@/components/auth-provider";
 import { api, API_URL } from "@/lib/api";
 
@@ -74,26 +73,9 @@ type UploadContextValue = {
 const UploadContext = createContext<UploadContextValue | null>(null);
 const CHUNK_SIZE = 5 * 1024 * 1024;
 
-const statusLabels: Record<UploadTask["status"], string> = {
-  uploading: "Đang tải lên",
-  uploaded: "Đã tải file gốc",
-  analyzing: "Đang AI phân tích",
-  saving_metadata: "Đang lưu metadata",
-  pending_confirmation: "Chờ xác nhận phân loại",
-  processing: "Đã lưu, AI đang xử lý",
-  completed: "Đã lưu, AI xử lý nền",
-  failed: "Thất bại",
-};
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 export function UploadTaskProvider({ children }: { children: React.ReactNode }) {
   const { token, user } = useAuth();
   const [tasks, setTasks] = useState<UploadTask[]>([]);
-  const [open, setOpen] = useState(true);
   const files = useRef(new Map<string, File>());
 
   const mergeTask = useCallback((incoming: UploadTask) => {
@@ -186,7 +168,6 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
     }, token);
     files.current.set(task.id, file);
     mergeTask(task);
-    setOpen(true);
     void continueUpload(task, file);
     return task.id;
   }
@@ -214,7 +195,7 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
   async function removeTask(taskId: string, skipConfirm = false) {
     const task = tasks.find(item => item.id === taskId);
     const message = task?.document_id || task?.status === "completed"
-      ? "Xóa tác vụ này khỏi danh sách Upload gần đây?"
+      ? "Xóa thông báo upload này?"
       : "Bạn có chắc muốn hủy file upload này không?";
     if (!skipConfirm && !window.confirm(message)) return;
     try {
@@ -231,38 +212,6 @@ export function UploadTaskProvider({ children }: { children: React.ReactNode }) 
 
   return <UploadContext.Provider value={{ tasks, startUpload, retryUpload, removeTask }}>
     {children}
-    <div className="fixed bottom-4 right-4 z-[80] w-[min(390px,calc(100vw-2rem))] app-card overflow-hidden shadow-xl">
-      <button className="flex w-full items-center gap-2 border-b border-[var(--border)] px-4 py-3 text-left" onClick={() => setOpen(value => !value)}>
-        <UploadCloud className="text-blue-600" size={17}/>
-        <strong className="text-sm">Upload gần đây</strong>
-        <span className="badge badge-blue ml-auto">{tasks.filter(task => !["completed", "failed"].includes(task.status)).length}</span>
-        {open ? <ChevronDown size={16}/> : <ChevronUp size={16}/>}
-      </button>
-      {open && <div className="max-h-[430px] space-y-2 overflow-y-auto p-3">
-        {!tasks.length && <p className="muted p-3 text-center text-xs">Chưa có tác vụ upload. Bạn có thể tiếp tục làm việc khi file đang được xử lý.</p>}
-        {tasks.slice(0, 8).map(task => {
-          const progress = Math.round(task.uploaded_bytes / task.total_bytes * 100);
-          const active = !["completed", "failed"].includes(task.status);
-          const canCancel = ["pending_confirmation", "failed"].includes(task.status);
-          return <div key={task.id} className="rounded-xl border border-[var(--border)] p-3">
-            <div className="flex items-start gap-2">
-              {task.status === "completed" ? <CheckCircle2 className="mt-0.5 text-green-600" size={16}/> : task.status === "failed" ? <XCircle className="mt-0.5 text-red-600" size={16}/> : <LoaderCircle className="mt-0.5 animate-spin text-blue-600" size={16}/>}
-              <div className="min-w-0 flex-1"><strong className="block truncate text-xs">{task.filename}</strong><span className="muted text-[10px]">{statusLabels[task.status]}</span></div>
-              {task.status === "failed" && <button className="btn-secondary px-2 py-1 text-[10px]" onClick={() => retryUpload(task.id)}><RefreshCw size={11}/>Thử lại</button>}
-              {canCancel && <button className="btn-secondary px-2 py-1 text-[10px] text-red-600" onClick={() => removeTask(task.id)}><Trash2 size={11}/>Hủy upload</button>}
-              {!active && !canCancel && <button className="icon-btn h-7 w-7" aria-label="Xóa tác vụ" onClick={() => removeTask(task.id)}><Trash2 size={12}/></button>}
-            </div>
-            <div className="progress mt-3"><i style={{ width: `${active ? progress : 100}%` }} className={task.status === "failed" ? "!bg-red-500" : task.status === "completed" ? "!bg-green-500" : ""}/></div>
-            <div className="muted mt-1 flex justify-between text-[10px]"><span>{formatBytes(task.uploaded_bytes)} / {formatBytes(task.total_bytes)}</span><span>{progress}%</span></div>
-            {task.metadata.ai_metadata && <div className="mt-2 rounded-lg bg-[var(--soft)] p-2 text-[10px]">
-              <strong className="block text-blue-700">Nhãn AI đã gán</strong>
-              <span className="muted">{task.metadata.ai_metadata.topic} · {task.metadata.ai_metadata.doc_type}</span>
-            </div>}
-            {task.error && <p className="mt-2 text-[10px] text-red-600">{task.error}</p>}
-          </div>;
-        })}
-      </div>}
-    </div>
   </UploadContext.Provider>;
 }
 

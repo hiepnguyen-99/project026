@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
-const backendUrl = (process.env.BACKEND_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
+if (!process.env.BACKEND_URL) {
+  throw new Error("Missing required environment variable: BACKEND_URL");
+}
+
+const backendUrl = process.env.BACKEND_URL.replace(/\/$/, "");
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,

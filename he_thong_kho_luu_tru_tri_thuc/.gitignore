@@ -7,3 +7,8 @@ data/mvp/
 client_secret_*.json
 .env.example
 !frontend/.env.example
+
+.tmp-chrome-ops/
+.tmp-edge-ops-shot/
+.tmp-edge-ops-shot-*/
+n8n_data/

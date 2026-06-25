@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import FastMCP
 
-from .database import connection, transaction
+from .database import connection, required_secret, transaction
 from .services import ask, list_documents, rag_documents
 
 mcp = FastMCP("EduVault Knowledge Base")
@@ -13,10 +14,27 @@ mcp = FastMCP("EduVault Knowledge Base")
 
 def _resolve_user(db, token: str) -> dict | None:
     row = db.execute(
-        "SELECT u.* FROM sessions s JOIN users u ON u.code=s.user_code WHERE s.token=? AND u.active=1",
+        "SELECT u.*, s.created_at session_created_at FROM sessions s JOIN users u ON u.code=s.user_code WHERE s.token=? AND u.active=1",
         (token,),
     ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    try:
+        created_at = datetime.fromisoformat(row["session_created_at"])
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        ttl_minutes = int(required_secret("SESSION_TTL_MINUTES"))
+    except (TypeError, ValueError):
+        db.execute("DELETE FROM sessions WHERE token=?", (token,))
+        db.commit()
+        return None
+    if datetime.now(timezone.utc) - created_at > timedelta(minutes=ttl_minutes):
+        db.execute("DELETE FROM sessions WHERE token=?", (token,))
+        db.commit()
+        return None
+    user = dict(row)
+    user.pop("session_created_at", None)
+    return user
 
 
 def _token() -> str:

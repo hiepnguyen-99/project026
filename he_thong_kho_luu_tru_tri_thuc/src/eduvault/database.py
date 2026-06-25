@@ -44,6 +44,32 @@ def hash_secret(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+INSECURE_SECRET_VALUES = {
+    "change-me",
+    "change-root-me",
+    "dev-policy-secret",
+    "eduvault-demo-secret",
+    "eduvault-demo-key-change-before-production",
+    "ADMIN",
+    "GV001",
+    "GVNEW",
+    "TBM01",
+}
+
+
+def required_secret(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    if value in INSECURE_SECRET_VALUES:
+        raise RuntimeError(f"Insecure demo value is not allowed for environment variable: {name}")
+    return value
+
+
+def seed_password_for(code: str) -> str:
+    return required_secret(f"EDUVAULT_SEED_PASSWORD_{code.upper()}")
+
+
 class MySQLConnection:
     def __init__(self):
         import pymysql
@@ -51,7 +77,7 @@ class MySQLConnection:
             host=os.getenv("MYSQL_HOST", "127.0.0.1"),
             port=int(os.getenv("MYSQL_PORT", "3306")),
             user=os.getenv("MYSQL_USER", "eduvault"),
-            password=os.getenv("MYSQL_PASSWORD", ""),
+            password=required_secret("MYSQL_PASSWORD"),
             database=os.getenv("MYSQL_DATABASE", "eduvault"),
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
@@ -304,6 +330,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE TABLE IF NOT EXISTS access_requests (
   id TEXT PRIMARY KEY, document_id TEXT NOT NULL, requester_code TEXT NOT NULL,
   owner_code TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT,
+  source_rule_id TEXT, source_rule_type TEXT, applied_at TEXT,
   UNIQUE(document_id, requester_code, status)
 );
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -318,6 +345,25 @@ CREATE TABLE IF NOT EXISTS policy_files (
   raw_text TEXT NOT NULL, parsed_json TEXT NOT NULL, created_by TEXT NOT NULL,
   created_at TEXT NOT NULL, activated_at TEXT,
   FOREIGN KEY(created_by) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS policy_nodes (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS policy_rules (
+  id TEXT PRIMARY KEY, rule_type TEXT NOT NULL, rule_name TEXT NOT NULL,
+  rule_content TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+  FOREIGN KEY(created_by) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS policy_audit_logs (
+  id TEXT PRIMARY KEY, actor TEXT NOT NULL, action TEXT NOT NULL,
+  before_state TEXT NOT NULL, after_state TEXT NOT NULL, status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS policy_action_requests (
+  id TEXT PRIMARY KEY, actor TEXT NOT NULL, message TEXT NOT NULL, action_json TEXT NOT NULL,
+  preview TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, confirmed_at TEXT,
+  applied_at TEXT, audit_log_id TEXT
 );
 CREATE TABLE IF NOT EXISTS folder_nodes (
   id TEXT PRIMARY KEY, policy_id TEXT NOT NULL, name TEXT NOT NULL, parent_id TEXT,
@@ -343,6 +389,38 @@ CREATE TABLE IF NOT EXISTS lecturer_folder_nodes (
   UNIQUE(user_code, source_master_node_id),
   FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(source_master_node_id) REFERENCES folder_nodes(id),
   FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+);
+CREATE TABLE IF NOT EXISTS lecturer_assignment_batches (
+  id TEXT PRIMARY KEY, policy_id TEXT, source TEXT NOT NULL, file_name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+  confirmed_by TEXT, confirmed_at TEXT, summary_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY(policy_id) REFERENCES policy_files(id), FOREIGN KEY(created_by) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS lecturer_assignments (
+  id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, policy_id TEXT NOT NULL,
+  lecturer_code TEXT NOT NULL, lecturer_name_snapshot TEXT NOT NULL DEFAULT '',
+  specialization_id TEXT NOT NULL, specialization_code_snapshot TEXT NOT NULL DEFAULT '',
+  specialization_name_snapshot TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, status TEXT NOT NULL,
+  effective_from TEXT, effective_to TEXT, validation_status TEXT NOT NULL DEFAULT 'valid',
+  validation_errors_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(batch_id, lecturer_code, specialization_id),
+  FOREIGN KEY(batch_id) REFERENCES lecturer_assignment_batches(id),
+  FOREIGN KEY(policy_id) REFERENCES policy_files(id), FOREIGN KEY(lecturer_code) REFERENCES users(code),
+  FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+);
+CREATE TABLE IF NOT EXISTS lecturer_assignment_audit_logs (
+  id TEXT PRIMARY KEY, assignment_id TEXT, batch_id TEXT, actor TEXT NOT NULL, action TEXT NOT NULL,
+  before_json TEXT NOT NULL DEFAULT '{}', after_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+  FOREIGN KEY(assignment_id) REFERENCES lecturer_assignments(id),
+  FOREIGN KEY(batch_id) REFERENCES lecturer_assignment_batches(id)
+);
+CREATE TABLE IF NOT EXISTS lecturer_folder_permissions (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, folder_node_id TEXT NOT NULL, permission TEXT NOT NULL,
+  source_assignment_id TEXT, policy_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(user_code, folder_node_id, permission, policy_id),
+  FOREIGN KEY(user_code) REFERENCES users(code), FOREIGN KEY(folder_node_id) REFERENCES folder_nodes(id),
+  FOREIGN KEY(source_assignment_id) REFERENCES lecturer_assignments(id), FOREIGN KEY(policy_id) REFERENCES policy_files(id)
 );
 CREATE TABLE IF NOT EXISTS backup_logs (
   id TEXT PRIMARY KEY, storage_path TEXT NOT NULL, status TEXT NOT NULL,
@@ -431,6 +509,27 @@ CREATE TABLE IF NOT EXISTS document_processing_jobs (
   created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, error_message TEXT,
   FOREIGN KEY(document_id) REFERENCES documents(id)
 );
+CREATE TABLE IF NOT EXISTS ops_restore_verifications (
+  id TEXT PRIMARY KEY, backup_id TEXT NOT NULL, status TEXT NOT NULL,
+  detail TEXT NOT NULL, verified_by TEXT NOT NULL, verified_at TEXT NOT NULL,
+  FOREIGN KEY(backup_id) REFERENCES backup_logs(id)
+);
+CREATE TABLE IF NOT EXISTS automation_heartbeats (
+  workflow TEXT PRIMARY KEY, last_success_at TEXT, last_failure_at TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0, last_detail TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS query_traces (
+  id TEXT PRIMARY KEY, user_code TEXT NOT NULL, original_query TEXT NOT NULL,
+  rewritten_query TEXT NOT NULL, intent TEXT NOT NULL, retrieved_json TEXT NOT NULL,
+  citations_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
+CREATE TABLE IF NOT EXISTS search_feedback (
+  id TEXT PRIMARY KEY, trace_id TEXT, user_code TEXT NOT NULL, rating TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+  FOREIGN KEY(user_code) REFERENCES users(code)
+);
 """
 
 MYSQL_SCHEMA = """
@@ -470,6 +569,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE TABLE IF NOT EXISTS access_requests (
   id VARCHAR(64) PRIMARY KEY, document_id VARCHAR(64) NOT NULL, requester_code VARCHAR(30) NOT NULL,
   owner_code VARCHAR(30) NOT NULL, status VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL, resolved_at VARCHAR(40),
+  source_rule_id VARCHAR(64), source_rule_type VARCHAR(80), applied_at VARCHAR(40),
   UNIQUE KEY uq_access_request(document_id, requester_code, status)
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -482,6 +582,25 @@ CREATE TABLE IF NOT EXISTS policy_files (
   raw_text LONGTEXT NOT NULL, parsed_json LONGTEXT NOT NULL, created_by VARCHAR(30) NOT NULL,
   created_at VARCHAR(40) NOT NULL, activated_at VARCHAR(40),
   INDEX idx_policy_files_status(status), FOREIGN KEY(created_by) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS policy_nodes (
+  id VARCHAR(64) PRIMARY KEY, name VARCHAR(200) NOT NULL, parent_id VARCHAR(64),
+  description TEXT NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS policy_rules (
+  id VARCHAR(64) PRIMARY KEY, rule_type VARCHAR(80) NOT NULL, rule_name VARCHAR(200) NOT NULL,
+  rule_content LONGTEXT NOT NULL, created_by VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL,
+  FOREIGN KEY(created_by) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS policy_audit_logs (
+  id VARCHAR(64) PRIMARY KEY, actor VARCHAR(30) NOT NULL, action VARCHAR(80) NOT NULL,
+  before_state LONGTEXT NOT NULL, after_state LONGTEXT NOT NULL, status VARCHAR(40) NOT NULL,
+  created_at VARCHAR(40) NOT NULL
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS policy_action_requests (
+  id VARCHAR(64) PRIMARY KEY, actor VARCHAR(30) NOT NULL, message LONGTEXT NOT NULL, action_json LONGTEXT NOT NULL,
+  preview LONGTEXT NOT NULL, status VARCHAR(40) NOT NULL, created_at VARCHAR(40) NOT NULL,
+  confirmed_at VARCHAR(40), applied_at VARCHAR(40), audit_log_id VARCHAR(64)
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS folder_nodes (
   id VARCHAR(64) PRIMARY KEY, policy_id VARCHAR(64) NOT NULL, name VARCHAR(200) NOT NULL, parent_id VARCHAR(64),
@@ -508,6 +627,40 @@ CREATE TABLE IF NOT EXISTS lecturer_folder_nodes (
   UNIQUE KEY uq_lecturer_folder_source(user_code, source_master_node_id),
   INDEX idx_lecturer_folder_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code),
   FOREIGN KEY(source_master_node_id) REFERENCES folder_nodes(id), FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS lecturer_assignment_batches (
+  id VARCHAR(64) PRIMARY KEY, policy_id VARCHAR(64), source VARCHAR(80) NOT NULL, file_name TEXT NOT NULL,
+  status VARCHAR(30) NOT NULL, created_by VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL,
+  confirmed_by VARCHAR(30), confirmed_at VARCHAR(40), summary_json LONGTEXT NOT NULL,
+  INDEX idx_assignment_batches_policy(policy_id), FOREIGN KEY(policy_id) REFERENCES policy_files(id),
+  FOREIGN KEY(created_by) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS lecturer_assignments (
+  id VARCHAR(64) PRIMARY KEY, batch_id VARCHAR(64) NOT NULL, policy_id VARCHAR(64) NOT NULL,
+  lecturer_code VARCHAR(30) NOT NULL, lecturer_name_snapshot VARCHAR(120) NOT NULL DEFAULT '',
+  specialization_id VARCHAR(64) NOT NULL, specialization_code_snapshot VARCHAR(80) NOT NULL DEFAULT '',
+  specialization_name_snapshot VARCHAR(200) NOT NULL DEFAULT '', source VARCHAR(80) NOT NULL, status VARCHAR(30) NOT NULL,
+  effective_from VARCHAR(40), effective_to VARCHAR(40), validation_status VARCHAR(30) NOT NULL DEFAULT 'valid',
+  validation_errors_json LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY uq_assignment_batch_user_spec(batch_id, lecturer_code, specialization_id),
+  INDEX idx_assignments_user(lecturer_code), INDEX idx_assignments_policy(policy_id),
+  FOREIGN KEY(batch_id) REFERENCES lecturer_assignment_batches(id),
+  FOREIGN KEY(policy_id) REFERENCES policy_files(id), FOREIGN KEY(lecturer_code) REFERENCES users(code),
+  FOREIGN KEY(specialization_id) REFERENCES specializations(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS lecturer_assignment_audit_logs (
+  id VARCHAR(64) PRIMARY KEY, assignment_id VARCHAR(64), batch_id VARCHAR(64), actor VARCHAR(30) NOT NULL,
+  action VARCHAR(100) NOT NULL, before_json LONGTEXT NOT NULL, after_json LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL,
+  FOREIGN KEY(assignment_id) REFERENCES lecturer_assignments(id), FOREIGN KEY(batch_id) REFERENCES lecturer_assignment_batches(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS lecturer_folder_permissions (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, folder_node_id VARCHAR(64) NOT NULL, permission VARCHAR(40) NOT NULL,
+  source_assignment_id VARCHAR(64), policy_id VARCHAR(64) NOT NULL, status VARCHAR(30) NOT NULL DEFAULT 'active',
+  created_at VARCHAR(40) NOT NULL, updated_at VARCHAR(40) NOT NULL,
+  UNIQUE KEY uq_folder_permission(user_code, folder_node_id, permission, policy_id),
+  INDEX idx_folder_permissions_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code),
+  FOREIGN KEY(folder_node_id) REFERENCES folder_nodes(id), FOREIGN KEY(source_assignment_id) REFERENCES lecturer_assignments(id),
+  FOREIGN KEY(policy_id) REFERENCES policy_files(id)
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS backup_logs ( id VARCHAR(64) PRIMARY KEY, storage_path TEXT NOT NULL, status VARCHAR(30) NOT NULL, created_by VARCHAR(30) NOT NULL, created_at VARCHAR(40) NOT NULL ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS courses ( code VARCHAR(30) PRIMARY KEY, name VARCHAR(200) NOT NULL, required_doc_types LONGTEXT NOT NULL ) ENGINE=InnoDB;
@@ -562,6 +715,28 @@ CREATE TABLE IF NOT EXISTS document_processing_jobs (
   created_at VARCHAR(40) NOT NULL, started_at VARCHAR(40), completed_at VARCHAR(40), error_message TEXT,
   INDEX idx_processing_jobs_document(document_id), FOREIGN KEY(document_id) REFERENCES documents(id)
 ) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS ops_restore_verifications (
+  id VARCHAR(64) PRIMARY KEY, backup_id VARCHAR(64) NOT NULL, status VARCHAR(30) NOT NULL,
+  detail LONGTEXT NOT NULL, verified_by VARCHAR(30) NOT NULL, verified_at VARCHAR(40) NOT NULL,
+  INDEX idx_restore_verify_backup(backup_id), FOREIGN KEY(backup_id) REFERENCES backup_logs(id)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS automation_heartbeats (
+  workflow VARCHAR(80) PRIMARY KEY, last_success_at VARCHAR(40), last_failure_at VARCHAR(40),
+  failure_count INT NOT NULL DEFAULT 0, last_detail LONGTEXT NOT NULL,
+  updated_at VARCHAR(40) NOT NULL
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS query_traces (
+  id VARCHAR(64) PRIMARY KEY, user_code VARCHAR(30) NOT NULL, original_query TEXT NOT NULL,
+  rewritten_query TEXT NOT NULL, intent VARCHAR(80) NOT NULL, retrieved_json LONGTEXT NOT NULL,
+  citations_json LONGTEXT NOT NULL, created_at VARCHAR(40) NOT NULL,
+  INDEX idx_query_traces_user(user_code), FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS search_feedback (
+  id VARCHAR(64) PRIMARY KEY, trace_id VARCHAR(64), user_code VARCHAR(30) NOT NULL, rating VARCHAR(30) NOT NULL,
+  reason VARCHAR(80) NOT NULL DEFAULT '', detail TEXT NOT NULL, created_at VARCHAR(40) NOT NULL,
+  INDEX idx_search_feedback_trace(trace_id), INDEX idx_search_feedback_user(user_code),
+  FOREIGN KEY(user_code) REFERENCES users(code)
+) ENGINE=InnoDB;
 """
 
 
@@ -601,6 +776,13 @@ def init_database() -> None:
                 db.execute("ALTER TABLE documents ADD COLUMN course_id TEXT")
             if "document_type" not in columns:
                 db.execute("ALTER TABLE documents ADD COLUMN document_type TEXT")
+            access_columns = {row["name"] for row in db.execute("PRAGMA table_info(access_requests)").fetchall()}
+            if "source_rule_id" not in access_columns:
+                db.execute("ALTER TABLE access_requests ADD COLUMN source_rule_id TEXT")
+            if "source_rule_type" not in access_columns:
+                db.execute("ALTER TABLE access_requests ADD COLUMN source_rule_type TEXT")
+            if "applied_at" not in access_columns:
+                db.execute("ALTER TABLE access_requests ADD COLUMN applied_at TEXT")
         else:
             doc_columns = {row["Field"] for row in db.execute("SHOW COLUMNS FROM documents").fetchall()}
             if "folder_node_id" not in doc_columns:
@@ -613,10 +795,17 @@ def init_database() -> None:
                 db.execute("ALTER TABLE documents ADD COLUMN course_id VARCHAR(64) NULL")
             if "document_type" not in doc_columns:
                 db.execute("ALTER TABLE documents ADD COLUMN document_type VARCHAR(80) NULL")
+            access_columns = {row["Field"] for row in db.execute("SHOW COLUMNS FROM access_requests").fetchall()}
+            if "source_rule_id" not in access_columns:
+                db.execute("ALTER TABLE access_requests ADD COLUMN source_rule_id VARCHAR(64) NULL")
+            if "source_rule_type" not in access_columns:
+                db.execute("ALTER TABLE access_requests ADD COLUMN source_rule_type VARCHAR(80) NULL")
+            if "applied_at" not in access_columns:
+                db.execute("ALTER TABLE access_requests ADD COLUMN applied_at VARCHAR(40) NULL")
         for code, name, role, department in SEED_USERS:
             db.execute(
                 "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?, ?, 1)",
-                (code, name, role, department, hash_secret(code)),
+                (code, name, role, department, hash_secret(seed_password_for(code))),
             )
         db.execute(
             "INSERT OR IGNORE INTO policies VALUES ('backup_321', ?, ?)",
@@ -650,6 +839,18 @@ def init_database() -> None:
                 "read_roles_before_exam": ["head"],
                 "publish_after_exam": True,
                 "public_scope": "authenticated_faculty",
+            }, ensure_ascii=False), now()),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO policies VALUES ('search_strategy', ?, ?)",
+            (json.dumps({
+                "lexical_weight": 0.62,
+                "vector_weight": 0.38,
+                "title_boost": 3.0,
+                "top_k": 8,
+                "rerank_k": 5,
+                "confidence_threshold": 1.0,
+                "decompose_min_chars": 120,
             }, ensure_ascii=False), now()),
         )
         db.execute(
@@ -697,10 +898,56 @@ def init_database() -> None:
                 (document["id"], classification, now()),
             )
         migrate_document_type_folder_placement(db)
+        migrate_legacy_lecturer_assignments(db)
 
 
 def rows(items) -> list[dict]:
     return [dict(item) for item in items]
+
+
+def migrate_legacy_lecturer_assignments(db) -> None:
+    legacy_rows = rows(db.execute(
+        """SELECT ls.user_code, ls.specialization_id, ls.created_at, u.name AS lecturer_name,
+                  s.name AS specialization_name, s.policy_id, pf.status AS policy_status
+           FROM lecturer_specializations ls
+           JOIN users u ON u.code=ls.user_code
+           JOIN specializations s ON s.id=ls.specialization_id
+           JOIN policy_files pf ON pf.id=s.policy_id"""
+    ).fetchall())
+    if not legacy_rows:
+        return
+    active_policy = next((item["policy_id"] for item in legacy_rows if item.get("policy_status") == "active"), legacy_rows[0]["policy_id"])
+    batch_id = f"lab-legacy-{hashlib.sha256(active_policy.encode('utf-8')).hexdigest()[:12]}"
+    summary = {
+        "total_rows": len(legacy_rows),
+        "valid_rows": len(legacy_rows),
+        "error_rows": 0,
+        "warning_rows": 0,
+        "source": "legacy_self_selected",
+    }
+    timestamp = now()
+    db.execute(
+        """INSERT OR IGNORE INTO lecturer_assignment_batches
+           (id,policy_id,source,file_name,status,created_by,created_at,confirmed_by,confirmed_at,summary_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        (batch_id, active_policy, "legacy_self_selected", "legacy lecturer_specializations", "active", "ADMIN", timestamp, "ADMIN", timestamp, json.dumps(summary, ensure_ascii=False)),
+    )
+    for item in legacy_rows:
+        assignment_key = f"{batch_id}:{item['user_code']}:{item['specialization_id']}"
+        assignment_id = f"la-{hashlib.sha256(assignment_key.encode('utf-8')).hexdigest()[:12]}"
+        created_at = item.get("created_at") or timestamp
+        db.execute(
+            """INSERT OR IGNORE INTO lecturer_assignments
+               (id,batch_id,policy_id,lecturer_code,lecturer_name_snapshot,specialization_id,
+                specialization_code_snapshot,specialization_name_snapshot,source,status,effective_from,effective_to,
+                validation_status,validation_errors_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                assignment_id, batch_id, item["policy_id"], item["user_code"], item.get("lecturer_name") or "",
+                item["specialization_id"], "", item.get("specialization_name") or "", "legacy_self_selected", "active",
+                created_at, None, "valid", "[]", created_at, created_at,
+            ),
+        )
 
 
 SNAPSHOT_TABLES = [
@@ -709,7 +956,11 @@ SNAPSHOT_TABLES = [
     "transfers", "external_storages", "sync_logs", "cloud_connections",
     "oauth_states", "cloud_sync_logs",
     "document_v2_state", "object_refs", "outbox_events", "upload_tasks", "document_classification_tickets", "document_processing_jobs",
-    "policy_files", "folder_nodes", "specializations", "lecturer_specializations", "lecturer_folder_nodes",
+    "policy_files", "policy_nodes", "policy_rules", "policy_audit_logs", "policy_action_requests",
+    "folder_nodes", "specializations", "lecturer_specializations", "lecturer_folder_nodes",
+    "lecturer_assignment_batches", "lecturer_assignments", "lecturer_assignment_audit_logs", "lecturer_folder_permissions",
+    "ops_restore_verifications", "automation_heartbeats",
+    "query_traces", "search_feedback",
 ]
 
 

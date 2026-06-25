@@ -140,6 +140,34 @@ export type Backup = {
   status: string;
   created_by: string;
   created_at: string;
+  manifest?: BackupManifest | null;
+};
+
+export type BackupManifest = {
+  backup_id: string;
+  created_at: string;
+  created_by: string;
+  checksum_file?: string;
+  documents_count: number;
+  versions_count: number;
+  chunks_count: number;
+  file_assets_count: number;
+  object_refs_count: number;
+  local_storage_size_bytes: number;
+  local_storage_files_count: number;
+  qdrant_collections_count: number;
+  qdrant_vectors_count: number;
+  minio_objects_count: number;
+  minio_size_bytes: number;
+  database_snapshot?: { included: boolean; file: string; size_bytes: number };
+  local_storage?: { included: boolean; files_count: number; size_bytes: number };
+  qdrant?: { included: boolean; error?: string; collections?: { name: string; vector_count: number; snapshot_size_bytes: number }[] };
+  minio?: { included: boolean; error?: string; objects_count: number; size_bytes: number };
+  checksum?: { file: string; entries_count: number };
+  included_components: { key: string; label: string; included: boolean; error?: string }[];
+  sample_documents: { id: string; title: string; topic: string; doc_type: string; owner_code: string; current_version: number; visibility: string; file_name?: string }[];
+  sample_files: { document_id: string; version_no: number; original_name: string; mime_type: string; size: number; created_at: string }[];
+  restore_scope: Record<string, boolean>;
 };
 
 export type Audit = {
@@ -148,6 +176,7 @@ export type Audit = {
   action: string;
   resource_type: string;
   resource_id?: string;
+  detail?: Record<string, unknown>;
   created_at: string;
 };
 

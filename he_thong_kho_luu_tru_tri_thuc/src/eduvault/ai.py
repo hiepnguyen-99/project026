@@ -68,13 +68,14 @@ class AIProvider:
     def ocr_images(self, images: list[bytes]) -> str:
         if not self.api_key or not images:
             return ""
+        model = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini").strip() or self.model
         content = [{"type": "input_text", "text": "Trích xuất nguyên văn toàn bộ chữ trong các trang tài liệu này. Giữ thứ tự đọc và xuống dòng hợp lý. Chỉ trả nội dung tài liệu."}]
         content.extend(
             {"type": "input_image", "image_url": f"data:image/png;base64,{base64.b64encode(image).decode('ascii')}"}
             for image in images[:10]
         )
         body = json.dumps(
-            {"model": self.model, "instructions": "Bạn là hệ thống OCR tài liệu tiếng Việt chính xác.", "input": [{"role": "user", "content": content}]},
+            {"model": model, "instructions": "Bạn là hệ thống OCR tài liệu tiếng Việt chính xác.", "input": [{"role": "user", "content": content}]},
             ensure_ascii=False,
         ).encode("utf-8")
         request = urllib.request.Request(

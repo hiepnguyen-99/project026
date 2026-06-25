@@ -13,14 +13,14 @@ Start-Process python -ArgumentList "run_mvp.py" -WorkingDirectory $root -WindowS
     -RedirectStandardError (Join-Path $root "v2-backend.stderr.log")
 
 Write-Host "Starting EduVault V2 frontend..."
-Start-Process npm.cmd -ArgumentList "run","dev" -WorkingDirectory (Join-Path $root "frontend") -WindowStyle Hidden `
+Start-Process npm.cmd -ArgumentList "run","dev","--","-p","3001" -WorkingDirectory (Join-Path $root "frontend") -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $root "v2-frontend.stdout.log") `
     -RedirectStandardError (Join-Path $root "v2-frontend.stderr.log")
 
 Write-Host ""
 Write-Host "EduVault V2 demo is starting:"
-Write-Host "  Frontend: http://127.0.0.1:3000"
-Write-Host "  API:      http://127.0.0.1:8080/docs"
+Write-Host "  Frontend: http://127.0.0.1:3001"
+Write-Host "  API:      http://127.0.0.1:8081/docs"
 Write-Host "  Accounts: GV001, GVNEW, TBM01, ADMIN (password equals account code)"
 Write-Host ""
 Write-Host "For real MySQL/MinIO/Redis/Qdrant, run:"

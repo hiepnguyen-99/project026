@@ -7,9 +7,10 @@ import difflib
 import json
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,16 +23,21 @@ from .database import DATA_DIR, ROOT, connection, database_backend, hash_secret,
 from .infrastructure import infrastructure_status
 from .services import (
     anonymize_document, anonymize_documents, ask, audit, can_read, compliance_report, content_for, create_backup, delete_policy_file,
-    DOCUMENT_TYPES, active_course_suggestions, active_policy, create_document, create_policy_file, enqueue_processing_jobs, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
+    DOCUMENT_TYPES, active_course_suggestions, active_policy, apply_due_time_based_permission_rules, apply_policy_action, create_document, create_policy_action_request, create_policy_file, enqueue_processing_jobs, expire_time_based_permission_rule, extract_text, folder_assignment_from_metadata, get_my_folder_tree, guess_metadata, index_document, knowledge_summary,
+    knowledge_transfer_actions, knowledge_transfer_course_gaps, knowledge_transfer_insights, knowledge_transfer_lecturer_dependency, knowledge_transfer_specialization_insights,
     list_deleted_documents, list_documents, list_policy_files, master_tree, permanently_delete_document,
+    governance_rule_detail, list_governance_rules,
     build_lecturer_folder_tree, profile_specializations, public_specializations, quality_report, restore_backup, restore_deleted_document, rollback_document, save_file_asset,
-    quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
-    activate_policy_file, set_user_specializations, validate_folder_access,
+    extraction_placeholder, global_knowledge_search, list_audit_logs, meaningful_text_score, qdrant_reindex_status, quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
+    activate_policy_file, preview_policy_activation, preview_policy_action, rollback_policy_action, set_user_specializations, validate_folder_access,
+    confirm_lecturer_assignment_batch, lecturer_assignment_batch_detail, list_lecturer_assignments, my_assignment, preview_lecturer_assignment_import,
+    backup_record_with_manifest, operations_status, record_automation_heartbeat, verify_restore_backup,
 )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    validate_security_config()
     init_database()
     with transaction() as db:
         for document in db.execute("SELECT * FROM documents WHERE status='INDEXED'").fetchall():
@@ -45,6 +51,51 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="EduVault API", version="2.0.0", lifespan=lifespan)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 MAX_AI_ANALYZE_BYTES = int(os.getenv("MAX_AI_ANALYZE_MB", "25")) * 1024 * 1024
+
+
+REQUIRED_SECURITY_ENV = (
+    "N8N_POLICY_SECRET",
+    "TOKEN_ENCRYPTION_KEY",
+    "SESSION_TTL_MINUTES",
+)
+
+INSECURE_SECRET_VALUES = {
+    "dev-policy-secret",
+    "eduvault-demo-key-change-before-production",
+    "change-me",
+    "change-root-me",
+    "eduvault-demo-secret",
+    "ADMIN",
+    "GV001",
+    "GVNEW",
+    "TBM01",
+}
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    if value in INSECURE_SECRET_VALUES:
+        raise RuntimeError(f"Insecure demo value is not allowed for environment variable: {name}")
+    return value
+
+
+def validate_security_config() -> None:
+    for name in REQUIRED_SECURITY_ENV:
+        _required_env(name)
+    ttl_raw = _required_env("SESSION_TTL_MINUTES")
+    try:
+        ttl = int(ttl_raw)
+    except ValueError as exc:
+        raise RuntimeError("SESSION_TTL_MINUTES must be an integer.") from exc
+    if ttl <= 0:
+        raise RuntimeError("SESSION_TTL_MINUTES must be greater than zero.")
+    if os.getenv("DATABASE_PROVIDER", "sqlite").strip().lower() == "mysql":
+        _required_env("MYSQL_PASSWORD")
+    if os.getenv("MINIO_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        _required_env("MINIO_ACCESS_KEY")
+        _required_env("MINIO_SECRET_KEY")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -52,6 +103,8 @@ app.add_middleware(
         "http://localhost:8000",
         "http://127.0.0.1:3000",
         "http://localhost:3000",
+        "http://127.0.0.1:3001",
+        "http://localhost:3001",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,6 +133,14 @@ class AnalyzeInput(BaseModel):
 
 class Question(BaseModel):
     question: str = Field(min_length=2, max_length=1000)
+    filters: dict | None = None
+
+
+class SearchFeedbackInput(BaseModel):
+    trace_id: str
+    rating: str
+    reason: str = ""
+    detail: str = ""
 
 
 class TransferInput(BaseModel):
@@ -99,6 +160,37 @@ class ExamPublicationInput(BaseModel):
 
 class PolicyInput(BaseModel):
     value: dict
+
+
+class PolicyAssistantInput(BaseModel):
+    message: str = Field(min_length=2, max_length=1000)
+
+
+class PolicyAssistantConfirmInput(BaseModel):
+    message: str = Field(min_length=2, max_length=1000)
+    action: dict
+    preview: dict
+    apply_now: bool = False
+
+
+class InternalPolicyApplyInput(BaseModel):
+    request_id: str | None = None
+    actor: str = Field(default="n8n", min_length=2, max_length=60)
+    action: dict
+
+
+class InternalPolicyRollbackInput(BaseModel):
+    audit_log_id: str
+    actor: str = Field(default="n8n", min_length=2, max_length=60)
+
+
+class AutomationHeartbeatInput(BaseModel):
+    workflow: Literal["policy_activation", "lecturer_assignment"] | None = None
+    workflow_name: str | None = Field(default=None, max_length=120)
+    status: Literal["success", "failure", "error"]
+    timestamp: str | None = Field(default=None, max_length=80)
+    detail: dict = Field(default_factory=dict)
+    details: dict | str | None = None
 
 
 class UserInput(BaseModel):
@@ -155,6 +247,7 @@ class UploadConfirmInput(BaseModel):
     specialization_id: str | None = None
     course_id: str | None = None
     folder_node_id: str | None = None
+    folder_path: str | None = None
     document_type: str = Field(min_length=2, max_length=80)
     visibility: Literal["public", "private"]
     final_destination_source: Literal["manual", "ai"] | None = None
@@ -164,15 +257,37 @@ class SpecializationSelection(BaseModel):
     specialization_ids: list[str] = Field(default_factory=list)
 
 
+class LecturerAssignmentConfirmInput(BaseModel):
+    batch_preview_id: str
+    apply_mode: Literal["replace_for_listed_lecturers", "append", "replace_all"] = "replace_for_listed_lecturers"
+
+
 def current_user(authorization: str = Header(default="")) -> dict:
     token = authorization.removeprefix("Bearer ").strip()
     with connection() as db:
         user = db.execute(
-            "SELECT u.* FROM sessions s JOIN users u ON u.code=s.user_code WHERE s.token=? AND u.active=1", (token,)
+            "SELECT u.*, s.created_at session_created_at FROM sessions s JOIN users u ON u.code=s.user_code WHERE s.token=? AND u.active=1", (token,)
         ).fetchone()
     if not user:
         raise HTTPException(401, "Phiên đăng nhập không hợp lệ.")
-    return dict(user)
+    ttl_minutes = int(_required_env("SESSION_TTL_MINUTES"))
+    try:
+        created_at = datetime.fromisoformat(user["session_created_at"])
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        with connection() as db:
+            db.execute("DELETE FROM sessions WHERE token=?", (token,))
+            db.commit()
+        raise HTTPException(401, "Phiên đăng nhập đã hết hạn.")
+    if datetime.now(timezone.utc) - created_at > timedelta(minutes=ttl_minutes):
+        with connection() as db:
+            db.execute("DELETE FROM sessions WHERE token=?", (token,))
+            db.commit()
+        raise HTTPException(401, "Phiên đăng nhập đã hết hạn.")
+    user_dict = dict(user)
+    user_dict.pop("session_created_at", None)
+    return user_dict
 
 
 def require_roles(*roles):
@@ -186,16 +301,16 @@ def require_roles(*roles):
 ROLE_PERMISSIONS = {
     "admin": [
         "dashboard.view", "repository.view", "repository.upload", "policy.manage", "users.manage",
-        "permissions.manage", "backup.manage", "reports.view", "audit.view", "profile.manage",
+        "permissions.manage", "backup.manage", "cloud.sync", "reports.view", "audit.view", "profile.manage", "transfer.manage",
     ],
     "head": [
-        "dashboard.view", "repository.view", "transfer.manage", "quality.view", "reports.view", "profile.manage",
+        "dashboard.view", "repository.view", "policy.manage", "cloud.sync", "transfer.manage", "quality.view", "reports.view", "profile.manage",
     ],
     "lecturer": [
-        "dashboard.view", "repository.own", "repository.upload", "versions.view", "chatbot.use", "profile.manage",
+        "dashboard.view", "repository.own", "repository.upload", "cloud.sync", "versions.view", "chatbot.use", "profile.manage",
     ],
     "new_lecturer": [
-        "dashboard.view", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage",
+        "dashboard.view", "cloud.sync", "handover.view", "knowledge.summary", "chatbot.use", "profile.manage",
     ],
 }
 
@@ -226,6 +341,31 @@ def get_active_document(db, document_id: str) -> dict:
     if document.get("deleted_at"):
         raise HTTPException(404, "Tài liệu đang nằm trong thùng rác.")
     return document
+
+
+def require_internal_policy_secret(x_internal_policy_secret: str = Header(default="")) -> None:
+    expected = _required_env("N8N_POLICY_SECRET")
+    if not expected or not secrets.compare_digest(x_internal_policy_secret, expected):
+        raise HTTPException(403, "Internal policy endpoint chi cho n8n workflow duoc phep goi.")
+
+
+def maybe_call_n8n_policy_webhook(payload: dict) -> dict:
+    webhook_url = os.getenv("N8N_POLICY_WEBHOOK_URL", "").strip()
+    if not webhook_url:
+        return {"status": "not_configured", "message": "N8N_POLICY_WEBHOOK_URL chua duoc cau hinh; request dang cho n8n goi webhook."}
+    import urllib.request
+    import urllib.error
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(webhook_url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            text = response.read().decode("utf-8")
+            try:
+                return {"status": "sent", "response": json.loads(text)}
+            except json.JSONDecodeError:
+                return {"status": "sent", "response": text}
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return {"status": "failed", "message": str(exc)}
 
 
 @app.get("/api/health")
@@ -263,6 +403,34 @@ def v2_status(user: dict = Depends(current_user)):
 @app.get("/api/ai/status")
 def ai_status(user: dict = Depends(current_user)):
     return ai_provider.status()
+
+
+@app.get("/api/operations/status")
+def operations(user: dict = Depends(require_roles("admin"))):
+    with connection() as db:
+        return operations_status(db)
+
+
+@app.post("/api/operations/backups/{backup_id}/verify")
+def verify_backup_restore(backup_id: str, user: dict = Depends(require_roles("admin"))):
+    try:
+        with transaction() as db:
+            return verify_restore_backup(db, user, backup_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+@app.post("/api/operations/n8n/heartbeat")
+def n8n_heartbeat(payload: AutomationHeartbeatInput, _: None = Depends(require_internal_policy_secret)):
+    try:
+        with transaction() as db:
+            workflow = payload.workflow or payload.workflow_name
+            detail = payload.detail or {}
+            if payload.details is not None:
+                detail = payload.details if isinstance(payload.details, dict) else {"message": payload.details}
+            return record_automation_heartbeat(db, workflow or "", payload.status, detail, payload.timestamp)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
 
 @app.get("/api/cloud/connections")
@@ -368,7 +536,10 @@ def dashboard(user: dict = Depends(current_user)):
                 for item in anonymize_documents(docs, user)
             ],
             "requests": requests,
-            "backups": rows(db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()),
+            "backups": [
+                backup_record_with_manifest(dict(item))
+                for item in db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()
+            ],
             "audit": rows(db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20").fetchall()) if user["role"] == "admin" else [],
         }
 
@@ -481,6 +652,15 @@ def activate_policy(policy_id: str, user: dict = Depends(require_roles("admin"))
         raise HTTPException(404, str(exc))
 
 
+@app.get("/api/policies/{policy_id}/activation-preview")
+def policy_activation_preview(policy_id: str, user: dict = Depends(require_roles("admin"))):
+    try:
+        with connection() as db:
+            return preview_policy_activation(db, policy_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @app.delete("/api/policies/{policy_id}")
 def delete_policy(policy_id: str, user: dict = Depends(require_roles("admin"))):
     try:
@@ -490,6 +670,113 @@ def delete_policy(policy_id: str, user: dict = Depends(require_roles("admin"))):
         raise HTTPException(400, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/policy-assistant/preview")
+def policy_assistant_preview(payload: PolicyAssistantInput, user: dict = Depends(require_roles("admin", "head"))):
+    with transaction() as db:
+        try:
+            return preview_policy_action(db, payload.message, user)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/policy-assistant/confirm")
+def policy_assistant_confirm(payload: PolicyAssistantConfirmInput, user: dict = Depends(require_roles("admin", "head"))):
+    applied = None
+    try:
+        with transaction() as db:
+            request = create_policy_action_request(db, user, payload.message, payload.action, payload.preview)
+            if payload.apply_now:
+                applied = apply_policy_action(db, user["code"], payload.action, request["id"])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    n8n = {"status": "skipped", "reason": "apply_now"} if payload.apply_now else maybe_call_n8n_policy_webhook(request["webhook_payload"])
+    return {**request, "n8n": n8n, "applied": applied}
+
+
+@app.get("/api/policy-assistant/audit")
+def policy_assistant_audit(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        items = rows(db.execute("SELECT * FROM policy_audit_logs ORDER BY created_at DESC LIMIT 100").fetchall())
+        for item in items:
+            item["before_state"] = json.loads(item["before_state"])
+            item["after_state"] = json.loads(item["after_state"])
+        return items
+
+
+@app.get("/api/policy-assistant/requests")
+def policy_assistant_requests(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        items = rows(db.execute("SELECT * FROM policy_action_requests ORDER BY created_at DESC LIMIT 100").fetchall())
+        for item in items:
+            item["action_json"] = json.loads(item["action_json"])
+            item["preview"] = json.loads(item["preview"])
+        return items
+
+
+@app.get("/api/governance-rules")
+def governance_rules(user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        return list_governance_rules(db)
+
+
+@app.get("/api/governance-rules/{rule_id}")
+def governance_rule(rule_id: str, user: dict = Depends(require_roles("admin", "head"))):
+    try:
+        with connection() as db:
+            return governance_rule_detail(db, rule_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/internal/policy/apply")
+def internal_policy_apply(payload: InternalPolicyApplyInput, _: None = Depends(require_internal_policy_secret)):
+    try:
+        with transaction() as db:
+            return apply_policy_action(db, payload.actor, payload.action, payload.request_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/internal/policy/rollback")
+def internal_policy_rollback(payload: InternalPolicyRollbackInput, _: None = Depends(require_internal_policy_secret)):
+    try:
+        with transaction() as db:
+            return rollback_policy_action(db, payload.actor, payload.audit_log_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/internal/policy/time-based-permissions/apply-due")
+def internal_apply_due_time_based_permissions(_: None = Depends(require_internal_policy_secret)):
+    with transaction() as db:
+        return apply_due_time_based_permission_rules(db, "n8n")
+
+
+@app.post("/internal/policy/time-based-permissions/{rule_id}/expire")
+def internal_expire_time_based_permission(rule_id: str, _: None = Depends(require_internal_policy_secret)):
+    try:
+        with transaction() as db:
+            return expire_time_based_permission_rule(db, "n8n", rule_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/internal/policy/tree")
+def internal_policy_tree(_: None = Depends(require_internal_policy_secret)):
+    with connection() as db:
+        return master_tree(db)
+
+
+@app.get("/internal/policy/audit")
+def internal_policy_audit(_: None = Depends(require_internal_policy_secret)):
+    with connection() as db:
+        items = rows(db.execute("SELECT * FROM policy_audit_logs ORDER BY created_at DESC LIMIT 200").fetchall())
+        for item in items:
+            item["before_state"] = json.loads(item["before_state"])
+            item["after_state"] = json.loads(item["after_state"])
+        return items
 
 
 @app.get("/api/admin/master-tree")
@@ -526,6 +813,8 @@ def get_profile_specializations(user: dict = Depends(current_user)):
 
 @app.put("/api/profile/specializations")
 def update_profile_specializations(payload: SpecializationSelection, user: dict = Depends(current_user)):
+    if user["role"] in {"lecturer", "new_lecturer"}:
+        raise HTTPException(403, "Chuyen mon cua giang vien duoc phan cong boi Admin/Truong bo mon. Ban khong the tu chon chuyen mon.")
     try:
         with transaction() as db:
             result = set_user_specializations(db, user, payload.specialization_ids)
@@ -533,6 +822,50 @@ def update_profile_specializations(payload: SpecializationSelection, user: dict 
             return result
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+@app.post("/api/lecturer-assignments/import/preview")
+async def preview_lecturer_assignments(request: Request, user: dict = Depends(require_roles("admin", "head"))):
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "File assignment rong.")
+    filename = request.headers.get("X-Filename") or ("assignments.json" if "json" in request.headers.get("Content-Type", "") else "assignments.csv")
+    mime_type = request.headers.get("Content-Type", "text/csv")
+    try:
+        with transaction() as db:
+            return preview_lecturer_assignment_import(db, user, filename, raw, mime_type)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/lecturer-assignments/import/confirm")
+def confirm_lecturer_assignments(payload: LecturerAssignmentConfirmInput, user: dict = Depends(require_roles("admin", "head"))):
+    try:
+        with transaction() as db:
+            return confirm_lecturer_assignment_batch(db, user, payload.batch_preview_id, payload.apply_mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/lecturer-assignments")
+def api_lecturer_assignments(status: str | None = None, user: dict = Depends(require_roles("admin", "head"))):
+    with connection() as db:
+        return {"items": list_lecturer_assignments(db, status=status)}
+
+
+@app.get("/api/lecturer-assignments/batches/{batch_id}")
+def api_lecturer_assignment_batch(batch_id: str, user: dict = Depends(require_roles("admin", "head"))):
+    try:
+        with connection() as db:
+            return lecturer_assignment_batch_detail(db, batch_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/my-assignment")
+def api_my_assignment(user: dict = Depends(current_user)):
+    with connection() as db:
+        return my_assignment(db, user)
 
 
 @app.put("/api/profile/password")
@@ -612,6 +945,8 @@ def reject_profile_update(req_id: str, user: dict = Depends(require_roles("admin
 
 @app.post("/api/lecturers/{lecturer_id}/specializations")
 def update_lecturer_specializations(lecturer_id: str, payload: SpecializationSelection, user: dict = Depends(current_user)):
+    if user["role"] in {"lecturer", "new_lecturer"}:
+        raise HTTPException(403, "Chuyen mon cua giang vien duoc phan cong boi Admin/Truong bo mon. Ban khong the tu chon chuyen mon.")
     if user["code"] != lecturer_id and user["role"] not in {"admin", "head"}:
         raise HTTPException(403, "Ban khong co quyen cap nhat nhom chuyen mon cua nguoi dung nay.")
     try:
@@ -668,16 +1003,21 @@ def rag_pipeline(user: dict = Depends(current_user)):
             "SELECT COUNT(*) count FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.deleted_at IS NULL AND d.status='INDEXED' AND (d.visibility='public' OR d.owner_code=?)",
             (user["code"],),
         ).fetchone()["count"]
+    vector_store = infrastructure_status()["services"]["vector_store"]
     return {
         "scope": "public_or_owned",
         "documents": documents,
         "chunks": chunks,
+        "qdrant": {
+            **vector_store,
+            "last_reindex": qdrant_reindex_status(),
+        },
         "stages": [
             {"name": "upload", "status": "ready"},
             {"name": "parse_pdf_docx_ocr", "status": "ready"},
             {"name": "chunk", "status": "ready"},
             {"name": "embedding", "status": "ready", "provider": ai_provider.status()["embedding_model"]},
-            {"name": "vector_store", "status": "ready", "provider": "sqlite_chunks"},
+            {"name": "vector_store", "status": "ready", "provider": "sqlite_chunks", "qdrant": vector_store},
             {"name": "permission_filter", "status": "ready", "rule": "public_or_owned"},
             {"name": "retrieve_answer", "status": "ready"},
         ],
@@ -771,6 +1111,8 @@ def process_upload_task(task_id: str) -> None:
             )
         raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
         content = extract_text(task["filename"], task["mime_type"], raw)
+        if meaningful_text_score(content) < 12:
+            content = extraction_placeholder(task["filename"], content)
         with connection() as db:
             prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
             prompts = json.loads(prompt_row["value"]) if prompt_row else {}
@@ -1004,8 +1346,6 @@ def analyze_upload(task_id: str, user: dict = Depends(current_user)):
 
 @app.post("/api/uploads/{task_id}/confirm", status_code=201)
 def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: BackgroundTasks, user: dict = Depends(current_user)):
-    if payload.document_type not in DOCUMENT_TYPES:
-        raise HTTPException(422, "Loai tai lieu khong hop le.")
     with transaction() as db:
         task = db.execute("SELECT * FROM upload_tasks WHERE id=? AND user_code=?", (task_id, user["code"])).fetchone()
         if not task:
@@ -1032,6 +1372,9 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         if selected_node and selected_node["type"] == "standard_folder":
             final_document_type = selected_node["name"]
             final_course_id = selected_node["parent_id"]
+        selected_document_folder = bool(selected_node and selected_node["type"] in {"standard_folder", "folder", "document_type_folder"})
+        if final_document_type not in DOCUMENT_TYPES and not selected_document_folder:
+            raise HTTPException(422, "Loai tai lieu khong hop le.")
         selected_course = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='course' AND status='active'", (final_course_id,)).fetchone() if final_course_id else None
         if selected_course:
             spec_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND type='specialization' AND status='active'", (selected_course["parent_id"],)).fetchone()
@@ -1040,6 +1383,8 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
         assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
         if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
             raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
+        if not assignment["folder_node_id"] and payload.folder_path:
+            assignment["folder_path"] = payload.folder_path
         destination_node = db.execute("SELECT * FROM folder_nodes WHERE id=? AND status='active'", (assignment["folder_node_id"],)).fetchone() if assignment["folder_node_id"] else None
         if destination_node and destination_node["type"] in {"faculty", "specialization", "course"}:
             raise HTTPException(400, "Document must be saved inside a document-type folder.")
@@ -1383,7 +1728,7 @@ def rollback(document_id: str, version_no: int, user: dict = Depends(current_use
 @app.post("/api/search")
 def search(payload: Question, user: dict = Depends(current_user)):
     with transaction() as db:
-        return ask(db, user, payload.question)
+        return ask(db, user, payload.question, payload.filters)
 
 
 @app.post("/api/search/stream")
@@ -1392,7 +1737,7 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
         yield json.dumps({"type": "status", "message": "Đang tìm trong kho tri thức..."}, ensure_ascii=False) + "\n"
         try:
             with transaction() as db:
-                result = ask(db, user, payload.question)
+                result = ask(db, user, payload.question, payload.filters)
         except Exception as exc:
             yield json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False) + "\n"
             return
@@ -1406,6 +1751,10 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
                 "citations": result["citations"],
                 "scope": result["scope"],
                 "pipeline": result.get("pipeline", []),
+                "trace_id": result.get("trace_id"),
+                "intent": result.get("intent"),
+                "rewritten_query": result.get("rewritten_query"),
+                "verification": result.get("verification"),
             },
             ensure_ascii=False,
         ) + "\n"
@@ -1415,6 +1764,28 @@ def search_stream(payload: Question, user: dict = Depends(current_user)):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/search/feedback", status_code=201)
+def search_feedback(payload: SearchFeedbackInput, user: dict = Depends(current_user)):
+    feedback_id = f"fb-{secrets.token_hex(6)}"
+    with transaction() as db:
+        db.execute(
+            "INSERT INTO search_feedback(id,trace_id,user_code,rating,reason,detail,created_at) VALUES(?,?,?,?,?,?,?)",
+            (feedback_id, payload.trace_id, user["code"], payload.rating, payload.reason, payload.detail, now()),
+        )
+        audit(db, user["code"], "rag.feedback", "query", payload.trace_id, {
+            "feedback_id": feedback_id,
+            "rating": payload.rating,
+            "reason": payload.reason,
+        })
+    return {"id": feedback_id, "status": "received"}
+
+
+@app.get("/api/search/global")
+def search_global(q: str = "", user: dict = Depends(current_user)):
+    with connection() as db:
+        return global_knowledge_search(db, user, q)
 
 
 @app.get("/api/trash")
@@ -1477,6 +1848,36 @@ def transfers(user: dict = Depends(current_user)):
         if user["role"] in {"head", "admin"}:
             return rows(db.execute("SELECT t.*,c.name course_name FROM transfers t JOIN courses c ON c.code=t.course_code ORDER BY created_at DESC").fetchall())
         return rows(db.execute("SELECT t.*,c.name course_name FROM transfers t JOIN courses c ON c.code=t.course_code WHERE from_code=? OR to_code=? ORDER BY created_at DESC", (user["code"], user["code"])).fetchall())
+
+
+@app.get("/api/knowledge-transfer/insights")
+def knowledge_transfer_insight_summary(user: dict = Depends(require_roles("head", "admin"))):
+    with connection() as db:
+        return knowledge_transfer_insights(db)
+
+
+@app.get("/api/knowledge-transfer/actions")
+def knowledge_transfer_recommended_actions(user: dict = Depends(require_roles("head", "admin"))):
+    with connection() as db:
+        return knowledge_transfer_actions(db)
+
+
+@app.get("/api/knowledge-transfer/insights/specializations")
+def knowledge_transfer_insight_specializations(user: dict = Depends(require_roles("head", "admin"))):
+    with connection() as db:
+        return knowledge_transfer_specialization_insights(db)
+
+
+@app.get("/api/knowledge-transfer/insights/course-gaps")
+def knowledge_transfer_insight_course_gaps(user: dict = Depends(require_roles("head", "admin"))):
+    with connection() as db:
+        return knowledge_transfer_course_gaps(db)
+
+
+@app.get("/api/knowledge-transfer/insights/lecturer-dependency")
+def knowledge_transfer_insight_lecturer_dependency(user: dict = Depends(require_roles("head", "admin"))):
+    with connection() as db:
+        return knowledge_transfer_lecturer_dependency(db)
 
 
 @app.post("/api/transfers", status_code=201)
@@ -1553,6 +1954,28 @@ def backup_compliance(user: dict = Depends(require_roles("head", "admin"))):
         return compliance_report(db)
 
 
+@app.get("/api/audit-logs")
+def audit_logs(
+    actor: str = Query(default=""),
+    action: str = Query(default=""),
+    resource_type: str = Query(default=""),
+    q: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user: dict = Depends(require_roles("admin")),
+):
+    with connection() as db:
+        return list_audit_logs(
+            db,
+            actor=actor,
+            action=action,
+            resource_type=resource_type,
+            query=q,
+            page=page,
+            page_size=page_size,
+        )
+
+
 @app.post("/api/access-requests/{document_id}", status_code=201)
 def request_access(document_id: str, user: dict = Depends(current_user)):
     with transaction() as db:
@@ -1565,7 +1988,11 @@ def request_access(document_id: str, user: dict = Depends(current_user)):
             raise HTTPException(400, "Bạn đã được cấp quyền đọc tài liệu.")
         request_id = f"req-{secrets.token_hex(6)}"
         try:
-            db.execute("INSERT INTO access_requests VALUES(?,?,?,?, 'pending', ?, NULL)", (request_id, document_id, user["code"], document["owner_code"], now()))
+            db.execute(
+                """INSERT INTO access_requests(id,document_id,requester_code,owner_code,status,created_at,resolved_at)
+                   VALUES(?,?,?,?, 'pending', ?, NULL)""",
+                (request_id, document_id, user["code"], document["owner_code"], now()),
+            )
         except Exception:
             raise HTTPException(409, "Đã có yêu cầu đang chờ xử lý.")
         audit(db, user["code"], "access.request", "document", document_id)

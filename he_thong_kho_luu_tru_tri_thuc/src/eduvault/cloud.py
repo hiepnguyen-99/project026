@@ -12,7 +12,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from .database import now
+from .database import now, required_secret
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,7 +66,7 @@ def provider_status(provider: str) -> dict:
 
 
 def _cipher() -> Fernet:
-    secret = os.getenv("TOKEN_ENCRYPTION_KEY", "eduvault-demo-key-change-before-production")
+    secret = required_secret("TOKEN_ENCRYPTION_KEY")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     return Fernet(key)
 
@@ -199,13 +199,29 @@ def _upload(db, connection, document_id: str, source: Path) -> str:
         return _upload_with_token(connection["provider"], token, document_id, source)
     except urllib.error.HTTPError as exc:
         if exc.code != 401 or not connection["refresh_token"]:
-            raise
-        token = _refresh_access_token(connection["provider"], _unprotect(connection["refresh_token"]))
+            raise _cloud_http_error(exc) from exc
+        try:
+            token = _refresh_access_token(connection["provider"], _unprotect(connection["refresh_token"]))
+        except urllib.error.HTTPError as refresh_exc:
+            raise _cloud_http_error(refresh_exc) from refresh_exc
         db.execute(
             "UPDATE cloud_connections SET access_token=?,updated_at=? WHERE user_code=? AND provider=?",
             (_protect(token), now(), connection["user_code"], connection["provider"]),
         )
         return _upload_with_token(connection["provider"], token, document_id, source)
+
+
+def _cloud_http_error(exc: urllib.error.HTTPError) -> ValueError:
+    detail = exc.read().decode("utf-8", "replace")
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        payload = {}
+    error = payload.get("error")
+    description = payload.get("error_description") or payload.get("message") or detail
+    if error == "invalid_grant" or "expired or revoked" in description.lower():
+        return ValueError("Phiên Google Drive đã hết hạn hoặc bị thu hồi. Vui lòng bấm Kết nối lại rồi đồng bộ lại.")
+    return ValueError(f"Cloud API lỗi {exc.code}: {description or exc.reason}")
 
 
 def _upload_with_token(provider: str, token: str, document_id: str, source: Path) -> str:

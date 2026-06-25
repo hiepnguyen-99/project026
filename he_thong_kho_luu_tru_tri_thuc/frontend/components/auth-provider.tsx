@@ -17,9 +17,10 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const SESSION_KEY = "eduvault_session";
 
 function normalizeUser(user: User): User {
+  const rolePermissions = permissionsForRole(user.role);
   return {
     ...user,
-    permissions: user.permissions?.length ? user.permissions : permissionsForRole(user.role),
+    permissions: Array.from(new Set([...(user.permissions || []), ...rolePermissions])),
   };
 }
 
