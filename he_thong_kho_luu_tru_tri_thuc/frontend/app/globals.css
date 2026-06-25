@@ -72,7 +72,7 @@ button { cursor: pointer; }
 
 .sidebar-toggle { display:none; }
 
-@media (max-width: 1279px) {
+@media (max-width: 900px) {
   .desktop-sidebar { display:none; }
   .main-offset { margin-left:0 !important; }
   .sidebar-toggle { display:inline-flex; }

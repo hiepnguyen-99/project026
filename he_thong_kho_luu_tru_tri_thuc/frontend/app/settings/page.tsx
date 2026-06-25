@@ -7,7 +7,6 @@ import { useAuth } from "@/components/auth-provider";
 import { useBackendData } from "@/lib/hooks";
 import { FolderNode, PolicyFile, ProfileSpecializations } from "@/lib/api";
 import { PageHeader, Panel } from "@/components/ui";
-import { statusLabel } from "@/src/constants/ui-text";
 
 type Policy = { key: string; value: Record<string, unknown>; updated_at: string };
 type Storage = { id: string; name: string; provider: string; location: string; last_status: string };
@@ -24,9 +23,9 @@ export default function Settings() {
   const { data: masterTree, reload: reloadMasterTree } = useBackendData<MasterTree>("/api/admin/master-tree", emptyMaster);
   const { data: profile, reload: reloadProfile } = useBackendData<ProfileSpecializations>("/api/profile/specializations", emptyProfile);
   const [policyFile, setPolicyFile] = useState<File | null>(null);
-  const [policyTitle, setPolicyTitle] = useState("Chính sách học liệu khoa CNTT");
+  const [policyTitle, setPolicyTitle] = useState("Policy học liệu khoa CNTT");
   const [message, setMessage] = useState("");
-  const permission = policies.find(item => item.key === "permission_rules");
+  const permission = policies.find(x => x.key === "permission_rules");
   const assignedSpecializations = profile.available.filter(spec => profile.selected_ids.includes(spec.id));
 
   async function uploadPolicy() {
@@ -44,9 +43,9 @@ export default function Settings() {
       });
       setPolicyFile(null);
       await reloadPolicyFiles();
-      setMessage("Đã tải chính sách lên. Hãy kích hoạt chính sách để cập nhật cây thư mục chuẩn.");
+      setMessage("Đã upload policy. Hãy activate policy để cập nhật Master Folder Tree.");
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không tải được chính sách.");
+      setMessage(err instanceof Error ? err.message : "Không upload được policy.");
     }
   }
 
@@ -55,21 +54,21 @@ export default function Settings() {
     try {
       await request(`/api/policies/${policyId}/activate`, { method: "POST" });
       await Promise.all([reloadPolicyFiles(), reloadMasterTree(), reloadProfile()]);
-      setMessage("Cây thư mục chuẩn đã được cập nhật theo chính sách đang áp dụng.");
+      setMessage("Master Folder Tree đã được cập nhật theo policy active mới.");
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không kích hoạt được chính sách.");
+      setMessage(err instanceof Error ? err.message : "Không activate được policy.");
     }
   }
 
   async function deletePolicy(policy: PolicyFile) {
-    if (!confirm(`Xóa chính sách "${policy.title}"?`)) return;
+    if (!confirm(`Xóa policy "${policy.title}"?`)) return;
     setMessage("");
     try {
       await request(`/api/policies/${policy.id}`, { method: "DELETE" });
       await Promise.all([reloadPolicyFiles(), reloadMasterTree(), reloadProfile()]);
-      setMessage("Đã xóa chính sách.");
+      setMessage("Đã xóa policy.");
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Không xóa được chính sách.");
+      setMessage(err instanceof Error ? err.message : "Không xóa được policy.");
     }
   }
 
@@ -78,7 +77,7 @@ export default function Settings() {
       <PageHeader
         eyebrow="Cài đặt hệ thống"
         title="Cấu hình EduVault"
-        description="Quản lý chính sách, cây thư mục chuẩn và các cấu hình hệ thống."
+        description="Quản lý policy, Master Folder Tree và các cấu hình hệ thống."
         actions={<button className="btn-primary"><Save size={15}/>Đã kết nối</button>}
       />
       {(error || message) && (
@@ -87,18 +86,18 @@ export default function Settings() {
         </p>
       )}
       <div className="grid gap-5 xl:grid-cols-[1.2fr_.8fr]">
-        <Panel title="Tải chính sách và cây thư mục chuẩn" description="Quản trị viên tải chính sách lên, kích hoạt một bản duy nhất, hệ thống sinh cây chuẩn toàn khoa.">
+        <Panel title="Policy Upload và Master Folder Tree" description="Admin upload policy, activate một bản duy nhất, hệ thống sinh cây chuẩn toàn khoa.">
           <div className="space-y-4 p-4">
             {user?.role === "admin" && (
               <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
                 <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
-                  <input className="field" value={policyTitle} onChange={event => setPolicyTitle(event.target.value)} placeholder="Tiêu đề chính sách"/>
+                  <input className="field" value={policyTitle} onChange={event => setPolicyTitle(event.target.value)} placeholder="Tiêu đề policy"/>
                   <label className="btn-secondary cursor-pointer">
-                    <FileUp size={15}/>{policyFile?.name || "Chọn tệp"}
+                    <FileUp size={15}/>{policyFile?.name || "Chọn file"}
                     <input className="hidden" type="file" accept=".pdf,.docx,.txt,.json,.yaml,.yml" onChange={event => setPolicyFile(event.target.files?.[0] || null)}/>
                   </label>
                 </div>
-                <button className="btn-primary mt-3" disabled={!policyFile} onClick={uploadPolicy}>Tải chính sách lên</button>
+                <button className="btn-primary mt-3" disabled={!policyFile} onClick={uploadPolicy}>Upload policy</button>
               </div>
             )}
             <div className="space-y-2">
@@ -107,10 +106,10 @@ export default function Settings() {
                   <div className="flex flex-wrap items-center gap-2">
                     <Shield size={15} className="text-blue-600"/>
                     <strong className="text-xs">{policy.title}</strong>
-                    <span className={`badge ${policy.status === "active" ? "badge-green" : "badge-amber"}`}>{statusLabel(policy.status)}</span>
+                    <span className={`badge ${policy.status === "active" ? "badge-green" : "badge-amber"}`}>{policy.status}</span>
                     {user?.role === "admin" && (
                       <span className="ml-auto flex gap-2">
-                        {policy.status !== "active" && <button className="btn-secondary px-2 py-1 text-[11px]" onClick={() => activatePolicy(policy.id)}>Kích hoạt</button>}
+                        {policy.status !== "active" && <button className="btn-secondary px-2 py-1 text-[11px]" onClick={() => activatePolicy(policy.id)}>Activate</button>}
                         <button className="btn-secondary px-2 py-1 text-[11px] text-red-600" disabled={policy.status === "active"} onClick={() => deletePolicy(policy)}>
                           <Trash2 size={13}/>Xóa
                         </button>
@@ -121,29 +120,29 @@ export default function Settings() {
                 </div>
               ))}
             </div>
-            {!policyFiles.length && <p className="muted text-xs">Chưa có tệp chính sách. Quản trị viên hãy tải tệp chính sách để sinh cây thư mục chuẩn.</p>}
+            {!policyFiles.length && <p className="muted text-xs">Chưa có policy file. Admin hãy upload file policy để sinh Master Folder Tree.</p>}
           </div>
         </Panel>
 
-        <Panel title="Nhóm chuyên môn được phân công" description="Cây thư mục cá nhân được sinh từ phân công của quản trị viên hoặc trưởng bộ môn.">
+        <Panel title="Nhóm chuyên môn được phân công" description="Virtual Folder View được sinh từ phân công của Admin/Trưởng bộ môn.">
           <div className="space-y-3 p-4">
-            {!profile.policy && <p className="rounded bg-amber-50 p-3 text-xs text-amber-800">Hệ thống chưa có chính sách đang áp dụng. Vui lòng liên hệ quản trị viên.</p>}
+            {!profile.policy && <p className="rounded bg-amber-50 p-3 text-xs text-amber-800">Hệ thống chưa có policy active. Vui lòng liên hệ Admin.</p>}
             {assignedSpecializations.map(spec => (
               <div key={spec.id} className="rounded-lg border border-[var(--border)] p-3 text-sm">
                 <strong className="block">{spec.name}</strong>
-                <span className="muted text-[10px]">Nhóm chuyên môn này được phân công qua chính sách phân công giảng viên.</span>
+                <span className="muted text-[10px]">Nhóm chuyên môn này được phân công qua Lecturer Assignment Policy.</span>
               </div>
             ))}
             {profile.policy && !assignedSpecializations.length && <p className="rounded bg-slate-50 p-3 text-xs text-slate-700">Bạn chưa được phân công nhóm chuyên môn.</p>}
-            <p className="muted text-[11px]">Không thể tự chọn chuyên môn trong phần cài đặt.</p>
+            <p className="muted text-[11px]">Không thể tự tick chuyên môn trong Settings.</p>
           </div>
         </Panel>
       </div>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
-        <Panel title="Cây tri thức đang áp dụng">
+        <Panel title="Master Tree active">
           <div className="p-4">
-            {masterTree.tree ? <TreePreview node={masterTree.tree}/> : <p className="muted text-xs">{masterTree.message || "Chưa có cây tri thức đang áp dụng."}</p>}
+            {masterTree.tree ? <TreePreview node={masterTree.tree}/> : <p className="muted text-xs">{masterTree.message || "Chưa có Master Tree active."}</p>}
           </div>
         </Panel>
         <Panel title="Kho lưu trữ ngoài">
@@ -153,7 +152,7 @@ export default function Settings() {
                 <div className="flex items-center gap-2">
                   <Cloud size={15} className="text-blue-600"/>
                   <strong className="text-xs">{storage.name}</strong>
-                  <span className="badge badge-green ml-auto">{statusLabel(storage.last_status)}</span>
+                  <span className="badge badge-green ml-auto">{storage.last_status}</span>
                 </div>
                 <p className="muted mt-2 text-[10px]">{storage.provider} - {storage.location}</p>
               </div>
@@ -213,7 +212,7 @@ function TreePreview({ node }: { node: FolderNode }) {
     <div>
       <div className="relative mb-3">
         <Search className="muted absolute left-3 top-2.5" size={14}/>
-        <input className="field pl-9" value={query} onChange={event => setQuery(event.target.value)} placeholder="Tìm nhánh trong cây tri thức..."/>
+        <input className="field pl-9" value={query} onChange={event => setQuery(event.target.value)} placeholder="Tìm node trong Master Tree..."/>
       </div>
       <div role="tree" className="max-h-[50vh] overflow-auto">{render(node)}</div>
     </div>

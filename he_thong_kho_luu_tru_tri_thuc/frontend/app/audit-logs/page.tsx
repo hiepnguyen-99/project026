@@ -61,7 +61,7 @@ function AuditLogsContent() {
     try {
       setData(await request<AuditLogsResponse>(`/api/audit-logs?${queryString}`));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Kh?ng th? t?i nh?t k? h? th?ng.");
+      setError(err instanceof Error ? err.message : "Khong the tai nhat ky he thong.");
     } finally {
       setLoading(false);
     }
@@ -76,12 +76,12 @@ function AuditLogsContent() {
   }
 
   return <div>
-    <PageHeader eyebrow="Vận hành" title="Nh?t k? h? th?ng" description="Theo d?i h?nh ??ng qu?n tr?, t?i l?n, ch?nh s?ch, truy c?p v? s? ki?n v?n h?nh theo b? l?c ri?ng." actions={<button className="btn-secondary" onClick={() => void load()}><RefreshCw size={15}/>L?m m?i</button>}/>
+    <PageHeader eyebrow="Vận hành" title="Nhat ky he thong" description="Theo doi hanh dong quan tri, upload, policy, truy cap va su kien van hanh theo bo loc rieng." actions={<button className="btn-secondary" onClick={() => void load()}><RefreshCw size={15}/>Lam moi</button>}/>
     {error && <p className="mb-4 rounded bg-amber-50 p-3 text-xs text-amber-800">{error}</p>}
 
     <Panel title="Bo loc audit" description="Loc theo actor, action, resource va tu khoa tu do.">
       <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-4">
-        <input className="field" placeholder="M? ng??i d?ng" value={filters.actor} onChange={event => set("actor", event.target.value)} />
+        <input className="field" placeholder="Ma nguoi dung" value={filters.actor} onChange={event => set("actor", event.target.value)} />
         <select className="field" value={filters.action} onChange={event => set("action", event.target.value)}>
           <option value="">Tat ca hanh dong</option>
           {data.options.actions.map(item => <option key={item} value={item}>{item}</option>)}
@@ -110,7 +110,7 @@ function AuditLogsContent() {
       </div>
     </div>
 
-    <Panel title="D?ng th?i gian nh?t k?" description={loading ? "?ang t?i..." : "S? ki?n m?i nh?t ???c s?p x?p gi?m d?n theo th?i gian"} className="mt-5">
+    <Panel title="Dong thoi gian audit" description={loading ? "Dang tai..." : "Su kien moi nhat duoc sap xep giam dan theo thoi gian"} className="mt-5">
       <div className="space-y-3 p-4">
         {data.items.map(item => (
           <div key={item.id} className="rounded-lg border border-[var(--border)] p-3">
@@ -123,17 +123,17 @@ function AuditLogsContent() {
             <pre className="mt-2 overflow-x-auto rounded bg-[var(--soft)] p-3 text-[11px] leading-5 text-[var(--text)]">{JSON.stringify(item.detail || {}, null, 2)}</pre>
           </div>
         ))}
-        {!data.items.length && <p className="muted py-6 text-center text-xs">Kh?ng c? s? ki?n n?o ph? h?p b? l?c hi?n t?i.</p>}
+        {!data.items.length && <p className="muted py-6 text-center text-xs">Khong co su kien nao phu hop bo loc hien tai.</p>}
       </div>
     </Panel>
 
-    <Panel title="B?ng nh?t k?" className="mt-5">
+    <Panel title="Bang audit" className="mt-5">
       <div className="table-shell">
         <table className="data-table">
-          <thead><tr><th>ID</th><th>Ng??i th?c hi?n</th><th>H?nh ??ng</th><th>T?i nguy?n</th><th>Th?i gian</th></tr></thead>
+          <thead><tr><th>ID</th><th>Actor</th><th>Action</th><th>Resource</th><th>Thoi gian</th></tr></thead>
           <tbody>
             {data.items.map(item => <tr key={item.id}><td>{item.id}</td><td>{item.actor_code}</td><td><strong>{item.action}</strong></td><td>{item.resource_type}{item.resource_id ? `/${item.resource_id}` : ""}</td><td>{formatDate(item.created_at)}</td></tr>)}
-            {!data.items.length && <tr><td colSpan={5} className="muted text-center">Kh?ng c? d? li?u.</td></tr>}
+            {!data.items.length && <tr><td colSpan={5} className="muted text-center">Khong co du lieu.</td></tr>}
           </tbody>
         </table>
       </div>

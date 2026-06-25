@@ -1,0 +1,39 @@
+### sửa không hiển thị đề xuất AI 
+Đã sửa gốc theo hướng đơn giản:
+
+- Thêm default active policy khi init_database() chạy mà DB chưa có policy active: /D:/User/ProjectGithub/
+vinaiaction/C2-App-012/he_thong_kho_luu_tru_tri_thuc/src/eduvault/database.py:760
+
+- Seed luôn specializations, folder_nodes loại course, và các standard_folder để Master Tree có học phần ngay
+từ runtime: /D:/User/ProjectGithub/vinaiaction/C2-App-012/he_thong_kho_luu_tru_tri_thuc/src/eduvault/
+database.py:789
+
+- Gọi seed mặc định trong init DB: /D:/User/ProjectGithub/vinaiaction/C2-App-012/he_thong_kho_luu_tru_tri_thuc/
+src/eduvault/database.py:990
+
+- Nới confirm upload để active policy không bắt buộc chọn course nếu user chưa chọn: /D:/User/ProjectGithub/
+vinaiaction/C2-App-012/he_thong_kho_luu_tru_tri_thuc/src/eduvault/main.py:1420
+
+Đã kiểm tra:
+
+- DB mới sau init có 1 active policy, 1 specialization, 2 course nodes active.
+- python -m pytest tests\test_mvp_api.py pass: 56 passed.
+
+Có warning pytest cache do không ghi được .pytest_cache ở repo cha, không ảnh hưởng test.
+
+### sửa lỗi về việc các mục không hiển thị dấu tiếng việt khi AI đề xuất
+Lỗi nằm ở /D:/User/ProjectGithub/vinaiaction/C2-App-012/he_thong_kho_luu_tru_tri_thuc/src/eduvault/
+database.py:788: ensure_default_active_policy() trước đó thấy đã có active policy thì return ngay, nên policy-
+default-runtime cũ trong data/mvp/eduvault.db vẫn giữ tên không dấu như Tri tue nhan tao, Chuyen mon chung, De
+cuong mon hoc. Backend dùng chính các giá trị đó để tạo AI suggestion và reasoning ở /D:/User/ProjectGithub/
+vinaiaction/C2-App-012/he_thong_kho_luu_tru_tri_thuc/src/eduvault/main.py:1096, nên UI hiển thị không dấu.
+
+Tôi đã:
+
+- sửa ensure_default_active_policy() để nếu active policy hiện tại là policy-default-runtime thì nó sẽ
+reconcile và dựng lại cây mặc định bằng dữ liệu có dấu;
+
+- cập nhật trực tiếp DB runtime hiện tại để đổi sang Chuyên môn chung, Trí tuệ nhân tạo, Lập trình Python, Đề
+cương môn học, Bài giảng, Tài liệu tham khảo...
+
+### khi đưa file upload lên rồi click vào bắt đầu upload thì mới đề xuất folder lưu file

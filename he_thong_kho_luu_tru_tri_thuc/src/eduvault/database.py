@@ -757,6 +757,139 @@ SEED_DOCS = [
 ]
 
 
+DEFAULT_ACTIVE_POLICY = {
+    "id": "policy-default-runtime",
+    "title": "Default Runtime Policy",
+    "faculty": "Khoa CNTT",
+    "specializations": [
+        {
+            "id": "spec-default-general",
+            "node_id": "node-default-spec-general",
+            "name": "Chuyên môn chung",
+            "description": "Default specialization for runtime bootstrap.",
+            "courses": [
+                {"id": "node-default-course-ai101", "name": "Trí tuệ nhân tạo", "code": "AI101"},
+                {"id": "node-default-course-py101", "name": "Lập trình Python", "code": "PY101"},
+            ],
+        }
+    ],
+    "standard_folders": [
+        "Đề cương môn học",
+        "Bài giảng",
+        "Slide",
+        "Lab",
+        "Bài tập",
+        "Đề thi",
+        "Đáp án",
+        "Tài liệu tham khảo",
+    ],
+}
+
+
+def ensure_default_active_policy(db) -> None:
+    timestamp = now()
+    policy = DEFAULT_ACTIVE_POLICY
+    policy_id = policy["id"]
+    active_policy = db.execute("SELECT id FROM policy_files WHERE status='active' ORDER BY activated_at DESC LIMIT 1").fetchone()
+    if active_policy and active_policy["id"] != policy_id:
+        return
+    faculty_id = "node-default-faculty-cntt"
+    faculty = policy["faculty"]
+    parsed = {
+        "faculty": faculty,
+        "faculty_code": "CNTT",
+        "specializations": [
+            {
+                "name": spec["name"],
+                "code": "AI",
+                "description": spec["description"],
+                "courses": [
+                    {
+                        "name": course["name"],
+                        "code": course["code"],
+                        "description": "",
+                        "standard_folders": policy["standard_folders"],
+                    }
+                    for course in spec["courses"]
+                ],
+            }
+            for spec in policy["specializations"]
+        ],
+        "standard_folders": policy["standard_folders"],
+        "master_tree_json": {
+            "faculty": faculty,
+            "faculty_code": "CNTT",
+            "specializations": [
+                {
+                    "name": spec["name"],
+                    "code": "AI",
+                    "node_type": "specialization",
+                    "courses": [
+                        {"name": course["name"], "code": course["code"], "node_type": "course"}
+                        for course in spec["courses"]
+                    ],
+                }
+                for spec in policy["specializations"]
+            ],
+        },
+        "folder_template_json": {"applies_to": "course", "standard_folders": policy["standard_folders"]},
+        "permission_rules_json": {},
+        "storage_rules_json": {"rules": []},
+    }
+
+    policy_dir = STORAGE_DIR / "policies"
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    file_path = policy_dir / f"{policy_id}.json"
+    raw_text = json.dumps(parsed, ensure_ascii=False, indent=2)
+    file_path.write_text(raw_text, encoding="utf-8")
+
+    db.execute("UPDATE policy_files SET status='archived' WHERE status='active'")
+    db.execute(
+        """INSERT INTO policy_files(id,title,file_path,status,raw_text,parsed_json,created_by,created_at,activated_at)
+           VALUES(?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(id) DO UPDATE SET
+             title=excluded.title,
+             file_path=excluded.file_path,
+             status='active',
+             raw_text=excluded.raw_text,
+             parsed_json=excluded.parsed_json,
+             activated_at=excluded.activated_at""",
+        (policy_id, policy["title"], str(file_path), "active", raw_text, raw_text, "ADMIN", timestamp, timestamp),
+    )
+
+    db.execute("DELETE FROM specializations WHERE policy_id=?", (policy_id,))
+    db.execute("DELETE FROM folder_nodes WHERE policy_id=?", (policy_id,))
+    db.execute("UPDATE folder_nodes SET status='deprecated',updated_at=? WHERE status='active' AND policy_id<>?", (timestamp, policy_id))
+    db.execute(
+        "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        (faculty_id, policy_id, faculty, None, "faculty", faculty, "active", timestamp, timestamp),
+    )
+    for spec in policy["specializations"]:
+        spec_path = f"{faculty}/{spec['name']}"
+        db.execute(
+            "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (spec["node_id"], policy_id, spec["name"], faculty_id, "specialization", spec_path, "active", timestamp, timestamp),
+        )
+        db.execute(
+            "INSERT INTO specializations(id,name,description,policy_id,folder_node_id) VALUES(?,?,?,?,?)",
+            (spec["id"], spec["name"], spec["description"], policy_id, spec["node_id"]),
+        )
+        for course in spec["courses"]:
+            course_path = f"{spec_path}/{course['name']}"
+            db.execute(
+                "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (course["id"], policy_id, course["name"], spec["node_id"], "course", course_path, "active", timestamp, timestamp),
+            )
+            for folder in policy["standard_folders"]:
+                folder_key = f"{course['id']}:{folder}"
+                folder_id = f"node-default-folder-{hashlib.sha256(folder_key.encode('utf-8')).hexdigest()[:12]}"
+                folder_path = f"{course_path}/{folder}"
+                db.execute(
+                    "INSERT INTO folder_nodes(id,policy_id,name,parent_id,type,path,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (folder_id, policy_id, folder, course["id"], "standard_folder", folder_path, "active", timestamp, timestamp),
+                )
+
+
 def init_database() -> None:
     with transaction() as db:
         db.executescript(MYSQL_SCHEMA if database_backend() == "mysql" else SCHEMA)
@@ -861,6 +994,7 @@ def init_database() -> None:
             "INSERT OR IGNORE INTO courses VALUES ('PY101','Lập trình Python',?)",
             (json.dumps(["Đề cương", "Học liệu", "Slide"], ensure_ascii=False),),
         )
+        ensure_default_active_policy(db)
         for storage_id, name, provider in [
             ("local-primary", "Kho chính EduVault", "local"),
             ("google-drive", "Google Drive", "google_drive"),

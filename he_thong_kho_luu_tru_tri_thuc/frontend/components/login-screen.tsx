@@ -18,7 +18,7 @@ export function LoginScreen() {
     try {
       await login(code, password);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Đăng nhập thất bại.");
+      setError(err instanceof Error ? err.message : "Dang nhap that bai.");
     } finally {
       setLoading(false);
     }
@@ -30,16 +30,16 @@ export function LoginScreen() {
         <div className="bg-[var(--sidebar)] p-7 text-white">
           <div className="h-11 w-11 rounded-xl bg-blue-500 grid place-items-center"><BookOpenCheck size={24}/></div>
           <h1 className="mt-5 text-2xl font-bold">EduVault</h1>
-          <p className="mt-1 text-sm text-blue-100/70">Đăng nhập vào kho tri thức của khoa.</p>
+          <p className="mt-1 text-sm text-blue-100/70">Dang nhap vao kho tri thuc cua khoa.</p>
         </div>
         <form className="p-7" onSubmit={submit}>
-          <label className="text-xs font-bold">Mã người dùng<input className="field mt-2" value={code} onChange={e => setCode(e.target.value)}/></label>
-          <label className="mt-4 block text-xs font-bold">Mật khẩu<input type="password" className="field mt-2" value={password} onChange={e => setPassword(e.target.value)}/></label>
+          <label className="text-xs font-bold">Ma nguoi dung<input className="field mt-2" value={code} onChange={e => setCode(e.target.value)}/></label>
+          <label className="mt-4 block text-xs font-bold">Mat khau<input type="password" className="field mt-2" value={password} onChange={e => setPassword(e.target.value)}/></label>
           {error && <p className="mt-3 rounded-lg bg-red-50 p-3 text-xs text-red-700">{error}</p>}
           <button disabled={loading} className="btn-primary mt-5 w-full">
-            {loading ? <LoaderCircle className="animate-spin" size={16}/> : <LockKeyhole size={16}/>}Đăng nhập
+            {loading ? <LoaderCircle className="animate-spin" size={16}/> : <LockKeyhole size={16}/>}Dang nhap
           </button>
-          <p className="muted mt-4 text-[11px]">Liên hệ quản trị viên nếu bạn chưa có tài khoản.</p>
+          <p className="muted mt-4 text-[11px]">Lien he quan tri vien neu ban chua co tai khoan.</p>
         </form>
       </div>
     </main>

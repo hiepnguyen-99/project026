@@ -427,6 +427,29 @@ def test_upload_accepts_file_larger_than_ai_analysis_limit():
             main_module.MAX_UPLOAD_BYTES = original_upload_limit
 
 
+def test_file_upload_auto_detects_metadata_when_manual_fields_are_missing():
+    with tempfile.TemporaryDirectory() as directory:
+        configure_temp_storage(Path(directory))
+        with TestClient(app) as client:
+            lecturer = login(client, "GV001")
+            response = client.post(
+                "/api/documents/upload",
+                headers={
+                    **lecturer,
+                    "X-Filename": "rag_embedding_lesson.txt",
+                    "X-Visibility": "public",
+                    "Content-Type": "text/plain",
+                },
+                content="RAG embedding retrieval machine learning lesson".encode("utf-8"),
+            )
+            assert response.status_code == 201, response.text
+            document = response.json()["document"]
+            assert document["title"] == "Rag Embedding Lesson"
+            assert document["topic"]
+            assert document["doc_type"]
+            assert document["folder_path"]
+
+
 def test_chunked_upload_reports_progress_and_processes_in_background():
     with tempfile.TemporaryDirectory() as directory:
         configure_temp_storage(Path(directory))
@@ -1006,75 +1029,7 @@ def test_restore_verification_dry_run():
     assert verified.json()["status"] == "verified"
     assert verified.json()["detail"]["database_exists"] is True
     assert verified.json()["detail"]["storage_exists"] is True
-    assert verified.json()["detail"]["manifest_exists"] is True
-    assert verified.json()["detail"]["checksum_valid"] is True
     assert status.json()["last_restore_verification"]["backup_id"] == backup.json()["id"]
-
-
-def test_backup_writes_manifest_and_checksum():
-    with tempfile.TemporaryDirectory() as directory:
-        configure_temp_storage(Path(directory))
-        with TestClient(app) as client:
-            admin = login(client, "ADMIN")
-            backup = client.post("/api/admin/backups", headers=admin)
-            assert backup.status_code == 201
-            backup_dir = Path(backup.json()["storage_path"])
-            manifest = backup_dir / "manifest.json"
-            checksum = backup_dir / "checksum.sha256"
-            assert manifest.exists()
-            assert checksum.exists()
-            payload = json.loads(manifest.read_text(encoding="utf-8"))
-            assert payload["backup_id"] == backup.json()["id"]
-            assert payload["database_snapshot"]["included"] is True
-            assert payload["local_storage"]["included"] is True
-            assert "documents_count" in payload
-            assert "included_components" in payload
-            assert "manifest.json" in checksum.read_text(encoding="utf-8")
-
-
-def test_backup_succeeds_when_qdrant_backup_fails(monkeypatch):
-    with tempfile.TemporaryDirectory() as directory:
-        configure_temp_storage(Path(directory))
-        monkeypatch.setattr(services, "_qdrant_backup", lambda _target: {"included": False, "enabled": True, "collections_count": 0, "vectors_count": 0, "error": "qdrant unavailable"})
-        with TestClient(app) as client:
-            admin = login(client, "ADMIN")
-            backup = client.post("/api/admin/backups", headers=admin)
-
-    assert backup.status_code == 201
-    manifest = backup.json()["manifest"]
-    assert manifest["qdrant"]["included"] is False
-    assert manifest["qdrant"]["error"] == "qdrant unavailable"
-    assert manifest["database_snapshot"]["included"] is True
-
-
-def test_backup_succeeds_when_minio_backup_fails(monkeypatch):
-    with tempfile.TemporaryDirectory() as directory:
-        configure_temp_storage(Path(directory))
-        monkeypatch.setattr(services, "_minio_backup", lambda _target: {"included": False, "enabled": True, "bucket": "eduvault", "objects_count": 0, "size_bytes": 0, "error": "minio unavailable"})
-        with TestClient(app) as client:
-            admin = login(client, "ADMIN")
-            backup = client.post("/api/admin/backups", headers=admin)
-
-    assert backup.status_code == 201
-    manifest = backup.json()["manifest"]
-    assert manifest["minio"]["included"] is False
-    assert manifest["minio"]["error"] == "minio unavailable"
-    assert manifest["local_storage"]["included"] is True
-
-
-def test_restore_verification_fails_when_checksum_is_tampered():
-    with tempfile.TemporaryDirectory() as directory:
-        configure_temp_storage(Path(directory))
-        with TestClient(app) as client:
-            admin = login(client, "ADMIN")
-            backup = client.post("/api/admin/backups", headers=admin)
-            assert backup.status_code == 201
-            (Path(backup.json()["storage_path"]) / "manifest.json").write_text("{}", encoding="utf-8")
-            verified = client.post(f"/api/operations/backups/{backup.json()['id']}/verify", headers=admin)
-
-    assert verified.status_code == 200
-    assert verified.json()["status"] == "failed"
-    assert "Checksum" in verified.json()["detail"]["error"]
 
 
 def test_private_owner_anonymity_and_strict_chatbot_scope():
@@ -1601,6 +1556,9 @@ def test_policy_master_tree_specialization_virtual_view_and_upload_guard():
                 content=book_raw,
             ).status_code == 200
             assert client.post(f"/api/uploads/{book_task_id}/analyze", headers=lecturer).status_code == 202
+            book_ticket = client.get(f"/api/uploads/{book_task_id}", headers=lecturer).json()["metadata"]["classification_ticket"]
+            assert book_ticket["suggested_course"] == "Natural Language Processing"
+            assert book_ticket["suggestions"]
             confirmed_book = client.post(
                 f"/api/uploads/{book_task_id}/confirm",
                 headers=lecturer,

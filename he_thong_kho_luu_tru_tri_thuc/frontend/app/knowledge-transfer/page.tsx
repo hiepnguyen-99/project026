@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import type { ReactNode } from "react";
 import { AlertTriangle, BarChart3, BookOpenCheck, CheckCircle2, RefreshCw, ShieldCheck, Users } from "lucide-react";
@@ -111,7 +111,7 @@ export default function KnowledgeTransfer() {
   const canViewHandover = permissions.includes("handover.view") || permissions.includes("knowledge.summary");
 
   if (!ready) {
-    return <div className="muted p-6 text-sm">?ang t?i ph?n quy?n...</div>;
+    return <div className="muted p-6 text-sm">Dang tai phan quyen...</div>;
   }
 
   if (canManageTransfer) {
@@ -146,10 +146,10 @@ function NewLecturerKnowledgeTransfer() {
   return (
     <div>
       <PageHeader
-        eyebrow="Chuy?n giao tri th?c"
-        title="T?m t?t tri th?c"
-        description="Kh?ng gian b?n giao tri th?c c? nh?n cho gi?ng vi?n m?i: t?m t?t tri th?c, h?c ph?n li?n quan v? ti?n ?? chuy?n giao."
-        actions={<button className="btn-secondary" onClick={refreshAll}><RefreshCw size={15} />L?m m?i</button>}
+        eyebrow="Chuyen giao tri thuc"
+        title="Tom tat tri thuc"
+        description="Khong gian ban giao tri thuc ca nhan cho giang vien moi: tom tat tri thuc, hoc phan lien quan va tien do chuyen giao."
+        actions={<button className="btn-secondary" onClick={refreshAll}><RefreshCw size={15} />Lam moi</button>}
       />
 
       {!!errors.length && (
@@ -159,17 +159,17 @@ function NewLecturerKnowledgeTransfer() {
       )}
 
       <div className="grid gap-4 md:grid-cols-3">
-        <KpiCard title="T?m t?t tri th?c" value={`${processes.documents.length}`} detail="T?i li?u quy tr?nh c? th? ??c" icon={<BookOpenCheck size={18} />} />
-        <KpiCard title="Tri th?c h?c ph?n" value={`${courses.length}`} detail="H?c ph?n ?ang c? tri th?c li?n quan" icon={<ShieldCheck size={18} />} />
-        <KpiCard title="Ti?n ?? chuy?n giao" value={`${averageProgress}%`} detail={`${activeTransfers}/${transferCount} phi?n ?ang th?c hi?n`} icon={<CheckCircle2 size={18} />} />
+        <KpiCard title="Tom tat tri thuc" value={`${processes.documents.length}`} detail="Tai lieu quy trinh co the doc" icon={<BookOpenCheck size={18} />} />
+        <KpiCard title="Tri thuc hoc phan" value={`${courses.length}`} detail="Hoc phan dang co tri thuc lien quan" icon={<ShieldCheck size={18} />} />
+        <KpiCard title="Tien do chuyen giao" value={`${averageProgress}%`} detail={`${activeTransfers}/${transferCount} phien dang thuc hien`} icon={<CheckCircle2 size={18} />} />
       </div>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[.9fr_1.1fr]">
-        <Panel title="T?m t?t tri th?c" description="T?m t?t c?c t?i li?u quy tr?nh m? t?i kho?n hi?n t?i ???c ph?p ??c.">
-          <p className="rounded-md bg-slate-50 p-3 text-sm leading-6">{processes.summary || "Ch?a c? d? li?u t?m t?t."}</p>
+        <Panel title="Tom tat tri thuc" description="Tom tat cac tai lieu quy trinh ma tai khoan hien tai duoc phep doc.">
+          <p className="rounded-md bg-slate-50 p-3 text-sm leading-6">{processes.summary || "Chua co du lieu tom tat."}</p>
           <DataTable
             headers={["Document", "Topic", "Type"]}
-            empty="Ch?a c? t?i li?u quy tr?nh."
+            empty="Chua co tai lieu quy trinh."
             rows={processes.documents.map(document => [
               <strong key="title">{document.title}</strong>,
               document.topic || "-",
@@ -178,10 +178,10 @@ function NewLecturerKnowledgeTransfer() {
           />
         </Panel>
 
-        <Panel title="Tri th?c h?c ph?n" description="H?c ph?n v? t?i li?u li?n quan m? gi?ng vi?n m?i c? quy?n xem.">
+        <Panel title="Tri thuc hoc phan" description="Hoc phan va tai lieu lien quan ma giang vien moi co quyen xem.">
           <DataTable
             headers={["Hoc phan", "Tai lieu lien quan", "Chu de"]}
-            empty="Ch?a c? h?c ph?n li?n quan."
+            empty="Chua co hoc phan lien quan."
             rows={courses.map(course => {
               const documents = course.knowledge?.documents || [];
               const topics = Array.from(new Set(documents.map(document => document.topic).filter(Boolean)));
@@ -196,10 +196,10 @@ function NewLecturerKnowledgeTransfer() {
       </div>
 
       <div className="mt-5">
-        <Panel title="Ti?n ?? chuy?n giao" description="C?c phi?n chuy?n giao g?n v?i t?i kho?n hi?n t?i.">
+        <Panel title="Tien do chuyen giao" description="Cac phien chuyen giao gan voi tai khoan hien tai.">
           <DataTable
             headers={["Hoc phan", "Ban giao tu", "Ban giao cho", "Tien do", "Han chot", "Trang thai"]}
-            empty="Ch?a c? phi?n chuy?n giao."
+            empty="Chua co phien chuyen giao."
             rows={transfers.map(transfer => [
               <div key="course"><strong className="block">{transfer.course_name || transfer.course_code}</strong><span className="muted text-[10px]">{transfer.course_code}</span></div>,
               transfer.from_code,
@@ -231,29 +231,29 @@ function KnowledgeTransferDashboard() {
   return (
     <div>
       <PageHeader
-        eyebrow="Ph?n t?ch chuy?n giao tri th?c"
-        title="B?ng ?i?u khi?n chuy?n giao tri th?c"
+        eyebrow="Phan tich chuyen giao tri thuc"
+        title="Bang dieu khien chuyen giao tri thuc"
         description="Theo dõi khoảng trống tri thức, độ phủ tài liệu và rủi ro phụ thuộc giảng viên."
         actions={<button className="btn-secondary" onClick={refreshAll}><RefreshCw size={15} />Làm mới</button>}
       />
 
       <div className="mb-4 rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 text-xs">
-        <span className="muted">Ch?nh s?ch ?ang ?p d?ng: </span>
+        <span className="muted">Chinh sach dang ap dung: </span>
         <strong>{insight.policy?.title || "Chưa có policy active"}</strong>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <KpiCard title="?? ph? t?i li?u" value={`${summary.document_coverage_percent}%`} detail={`${summary.course_complete_count}/${summary.course_total_count} h?c ph?n ?? t?i li?u`} icon={<BookOpenCheck size={18} />} />
-        <KpiCard title="Tu?n th? ch?nh s?ch" value={`${summary.policy_compliance_percent}%`} detail="Si?u d? li?u v? ph?n quy?n theo th? m?c" icon={<ShieldCheck size={18} />} />
-        <KpiCard title="M?c s?n s?ng chuy?n giao" value={`${summary.transfer_readiness_score}/100`} detail={`M?c ?? r?i ro: ${riskLabel(summary.knowledge_risk)}`} icon={<BarChart3 size={18} />} />
-        <KpiCard title="Kho?ng tr?ng nghi?m tr?ng" value={`${summary.critical_gap_count}`} detail={`${summary.single_lecturer_specialization_count} chuy?n m?n ph? thu?c m?t gi?ng vi?n`} icon={<AlertTriangle size={18} />} tone={summary.critical_gap_count ? "danger" : "normal"} />
+        <KpiCard title="Do phu tai lieu" value={`${summary.document_coverage_percent}%`} detail={`${summary.course_complete_count}/${summary.course_total_count} hoc phan du tai lieu`} icon={<BookOpenCheck size={18} />} />
+        <KpiCard title="Tuan thu chinh sach" value={`${summary.policy_compliance_percent}%`} detail="Metadata va projection phan quyen theo folder" icon={<ShieldCheck size={18} />} />
+        <KpiCard title="Muc san sang chuyen giao" value={`${summary.transfer_readiness_score}/100`} detail={`Muc do rui ro: ${riskLabel(summary.knowledge_risk)}`} icon={<BarChart3 size={18} />} />
+        <KpiCard title="Khoang trong nghiem trong" value={`${summary.critical_gap_count}`} detail={`${summary.single_lecturer_specialization_count} chuyen mon phu thuoc 1 GV`} icon={<AlertTriangle size={18} />} tone={summary.critical_gap_count ? "danger" : "normal"} />
       </div>
 
       <div className="mt-5">
-        <Panel title="H?nh ??ng ?u ti?n" description="C?c vi?c n?n l?m ti?p theo ???c sinh t? quy t?c ?? ph?, ph?n c?ng v? ph? thu?c.">
+        <Panel title="Hanh dong uu tien" description="Cac viec nen lam tiep theo duoc sinh bang quy tac deterministic tu coverage, assignment va dependency.">
           <DataTable
             headers={["Priority", "Action", "Reason", "Recommended Actions"]}
-            empty="Kh?ng c? h?nh ??ng c?n x? l?."
+            empty="Khong co action can xu ly."
             rows={actions.slice(0, 8).map(item => [
               <PriorityBadge key="priority" priority={item.priority} />,
               <div key="title"><strong className="block">{item.title}</strong><span className="muted text-[10px]">{item.category}</span></div>,
@@ -266,7 +266,7 @@ function KnowledgeTransferDashboard() {
 
       {!!insight.top_risks.length && (
         <section className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4">
-          <p className="text-xs font-bold text-amber-900">R?i ro tri th?c n?i b?t</p>
+          <p className="text-xs font-bold text-amber-900">Rui ro tri thuc noi bat</p>
           <div className="mt-3 grid gap-2 lg:grid-cols-2">
             {insight.top_risks.map(item => (
               <div key={`${item.scope_name}-${item.reason}`} className="rounded-md bg-white p-3 text-xs">
@@ -282,7 +282,7 @@ function KnowledgeTransferDashboard() {
       )}
 
       <div className="mt-5 grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
-        <Panel title="B?ng r?i ro chuy?n m?n" description="?? ph? t?i li?u, assignment va readiness theo chuyen mon.">
+        <Panel title="Bang rui ro chuyen mon" description="Do phu tai lieu, assignment va readiness theo chuyen mon.">
           <DataTable
             headers={["Specialization", "Coverage", "Assigned Lecturers", "Readiness", "Risk"]}
             empty="Chưa có dữ liệu chuyên môn."
@@ -296,7 +296,7 @@ function KnowledgeTransferDashboard() {
           />
         </Panel>
 
-        <Panel title="B?ng thi?u t?i li?u theo h?c ph?n" description="C?c h?c ph?n c?n thi?u t?i li?u theo m?u th? m?c ?ang ?p d?ng.">
+        <Panel title="Bang thieu tai lieu theo hoc phan" description="Cac hoc phan con thieu tai lieu theo folder template dang active.">
           <DataTable
             headers={["Hoc phan", "Tai lieu con thieu", "Do phu", "Rui ro"]}
             empty="Không có course gap."
@@ -311,7 +311,7 @@ function KnowledgeTransferDashboard() {
       </div>
 
       <div className="mt-5">
-        <Panel title="B?ng ph? thu?c gi?ng vi?n" description="Ph?t hi?n chuy?n m?n ph? thu?c v?o m?t gi?ng vi?n ho?c m?t ch? s? h?u t?i li?u.">
+        <Panel title="Bang phu thuoc giang vien" description="Phat hien chuyen mon phu thuoc vao mot giang vien hoac mot owner tai lieu.">
           <DataTable
             headers={["Lecturer", "Specialization", "Owned Documents", "Dependency Risk"]}
             empty="Chưa có dữ liệu phụ thuộc giảng viên."
@@ -379,13 +379,13 @@ function PriorityBadge({ priority }: { priority: string }) {
 
 function StatusBadge({ status }: { status: string }) {
   const done = status === "completed";
-  return <span className={`badge ${done ? "badge-green" : "badge-blue"}`}>{done ? "Ho?n th?nh" : "?ang th?c hi?n"}</span>;
+  return <span className={`badge ${done ? "badge-green" : "badge-blue"}`}>{done ? "Hoan thanh" : "Dang thuc hien"}</span>;
 }
 
 function riskLabel(risk: string) {
-  if (risk === "critical") return "Nghi?m tr?ng";
+  if (risk === "critical") return "Nghiem trong";
   if (risk === "high") return "Cao";
-  if (risk === "medium") return "Trung b?nh";
-  if (risk === "low") return "Th?p";
-  return risk || "Kh?ng r?";
+  if (risk === "medium") return "Trung binh";
+  if (risk === "low") return "Thap";
+  return risk || "Khong ro";
 }

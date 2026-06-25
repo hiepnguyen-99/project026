@@ -7,11 +7,20 @@ import { useBackendData } from "@/lib/hooks";
 import { Bars, Metric, PageHeader, Panel } from "@/components/ui";
 
 const empty: DashboardData = { user: { code:"",name:"",role:"lecturer",department:"",permissions:[] }, stats:{documents:0,private:0,topics:0}, documents:[], requests:[], backups:[], audit:[] };
-const emptyV2: V2Status = { architecture:"v2-hybrid",database:"",ready:false,scope:"single-faculty",capacity_target_gb:100,rpo_target_minutes:60,rto_target_hours:4,services:{},objects:[],outbox:[] };
+const emptyV2: V2Status = { architecture:"v2-hybrid",database:"",ready:false,scope:"single-faculty",capacity_target_gb:0,rpo_target_minutes:0,rto_target_hours:0,services:{},objects:[],outbox:[] };
 
 export default function Dashboard() {
   const { data, loading, error } = useBackendData("/api/dashboard", empty);
   const { data:v2 } = useBackendData("/api/v2/status", emptyV2);
+  const auditActionCounts = Object.values(data.audit.reduce<Record<string, number>>((counts, item) => {
+    counts[item.action] = (counts[item.action] || 0) + 1;
+    return counts;
+  }, {})).map(count => Math.max(8, Math.min(100, count * 10)));
+  const operatingTargets = [
+    v2.capacity_target_gb ? `${v2.capacity_target_gb} GB` : "",
+    v2.rpo_target_minutes ? `RPO < ${v2.rpo_target_minutes}m` : "",
+    v2.rto_target_hours ? `RTO < ${v2.rto_target_hours}h` : "",
+  ].filter(Boolean).join(" · ");
   return <div>
     <PageHeader eyebrow="Tổng quan khoa" title={`Chào ${data.user.name || "bạn"}`} description="Tổng hợp dữ liệu mới nhất trong hệ thống EduVault."
       actions={<Link href="/repository" className="btn-primary"><Upload size={15}/>Tải tài liệu</Link>}/>
@@ -24,14 +33,14 @@ export default function Dashboard() {
       <Metric label="Audit gần đây" value={loading?"...":String(data.audit.length)} detail={data.user.role==="admin"?"Dành cho quản trị viên":"Theo phân quyền"} icon={<Activity size={18}/>}/>
     </div>
     <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_.9fr]">
-      <Panel title="Hoạt động kho tri thức" description="Biểu đồ tổng quan từ dữ liệu đang khả dụng"><div className="p-5"><Bars values={[35,52,41,68,58,75,62,84,72,65,91,78,88,96]}/></div></Panel>
+      <Panel title="Hoạt động kho tri thức" description="Biểu đồ tổng quan từ dữ liệu đang khả dụng"><div className="p-5">{auditActionCounts.length?<Bars values={auditActionCounts}/>:<p className="muted py-16 text-center text-sm">No data available</p>}</div></Panel>
       <Panel title="Trạng thái phiên làm việc"><div className="p-5 space-y-3">{[["Người dùng",data.user.name],["Vai trò",data.user.role],["Đơn vị",data.user.department],["Mã tài khoản",data.user.code]].map(x=><div key={x[0]} className="flex justify-between border-b border-[var(--border)] pb-2 text-xs"><span className="muted">{x[0]}</span><strong>{x[1]}</strong></div>)}</div></Panel>
     </div>
     <Panel title="Hạ tầng EduVault V2" description="Hybrid cho một khoa, tự chuyển sang fallback khi dịch vụ tùy chọn chưa bật." className="mt-5">
       <div className="grid gap-3 p-5 sm:grid-cols-2 xl:grid-cols-5">
         <V2Service label="Database" provider={v2.database||"đang kiểm tra"} available={true}/>
         {Object.entries(v2.services).map(([key,item])=><V2Service key={key} label={key.replaceAll("_"," ")} provider={item.provider} available={item.available}/>)}
-        <div className="rounded-xl border border-[var(--border)] p-4"><Boxes size={18} className="text-blue-600"/><strong className="mt-3 block text-xs">Mục tiêu vận hành</strong><span className="muted mt-1 block text-[11px]">100 GB · RPO &lt; 1h · RTO &lt; 4h</span></div>
+        <div className="rounded-xl border border-[var(--border)] p-4"><Boxes size={18} className="text-blue-600"/><strong className="mt-3 block text-xs">Mục tiêu vận hành</strong><span className="muted mt-1 block text-[11px]">{operatingTargets || "No data available"}</span></div>
       </div>
     </Panel>
     <div className="mt-5 grid gap-5 xl:grid-cols-[1.35fr_.9fr]">

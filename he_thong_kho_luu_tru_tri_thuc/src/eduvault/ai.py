@@ -127,14 +127,14 @@ Schema bat buoc:
           "code": "ma hoc phan neu co",
           "description": "",
           "standard_folders": [
-            "De cuong mon hoc",
-            "Bai giang",
+            "Đề cương môn học",
+            "Bài giảng",
             "Slide",
             "Lab",
-            "Bai tap",
-            "De thi",
-            "Dap an",
-            "Tai lieu tham khảo"
+            "Bài tập",
+            "Đề thi",
+            "Đáp án",
+            "Tài liệu tham khảo"
           ]
         }
       ]

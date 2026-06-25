@@ -8,6 +8,7 @@ import json
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request
@@ -31,7 +32,7 @@ from .services import (
     extraction_placeholder, global_knowledge_search, list_audit_logs, meaningful_text_score, qdrant_reindex_status, quick_preview_text, run_document_processing_jobs, set_v2_state, soft_delete_document, suggest_folder, suggest_upload_destination, sync_document, update_document, usage_report, v2_state_for,
     activate_policy_file, preview_policy_activation, preview_policy_action, rollback_policy_action, set_user_specializations, validate_folder_access,
     confirm_lecturer_assignment_batch, lecturer_assignment_batch_detail, list_lecturer_assignments, my_assignment, preview_lecturer_assignment_import,
-    backup_record_with_manifest, operations_status, record_automation_heartbeat, verify_restore_backup,
+    operations_status, record_automation_heartbeat, verify_restore_backup,
 )
 
 
@@ -103,8 +104,6 @@ app.add_middleware(
         "http://localhost:8000",
         "http://127.0.0.1:3000",
         "http://localhost:3000",
-        "http://127.0.0.1:3001",
-        "http://localhost:3001",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -241,6 +240,9 @@ class UploadInitInput(BaseModel):
     folder_path: str | None = None
     folder_node_id: str | None = None
     existing_document_id: str | None = None
+    specialization_id: str | None = None
+    course_id: str | None = None
+    final_destination_source: Literal["manual", "ai"] | None = None
 
 
 class UploadConfirmInput(BaseModel):
@@ -260,6 +262,43 @@ class SpecializationSelection(BaseModel):
 class LecturerAssignmentConfirmInput(BaseModel):
     batch_preview_id: str
     apply_mode: Literal["replace_for_listed_lecturers", "append", "replace_all"] = "replace_for_listed_lecturers"
+
+
+def metadata_payload_for_upload(
+    db,
+    user: dict,
+    filename: str,
+    mime_type: str,
+    raw: bytes,
+    *,
+    title: str = "",
+    topic: str = "",
+    doc_type: str = "",
+    visibility: str = "public",
+    folder_path: str = "",
+    folder_node_id: str = "",
+) -> dict:
+    preview = quick_preview_text(filename, mime_type, raw)
+    prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
+    prompts = json.loads(prompt_row["value"]) if prompt_row else {}
+    metadata = guess_metadata(filename, preview or filename, prompts.get("metadata_instructions"))
+    suggestion = suggest_upload_destination(db, dict(user), filename, preview or filename)
+    selected_type = doc_type.strip()
+    if selected_type not in DOCUMENT_TYPES:
+        selected_type = metadata.get("doc_type") or suggestion.get("document_type") or "Tài liệu khác"
+    if selected_type not in DOCUMENT_TYPES:
+        selected_type = "Tài liệu khác"
+    payload = {
+        "title": title.strip() or metadata.get("title") or Path(filename).stem.replace("_", " ").replace("-", " ").strip() or "Tài liệu chưa đặt tên",
+        "topic": topic.strip() or metadata.get("topic") or suggestion.get("course") or suggestion.get("specialization") or "Khác",
+        "doc_type": selected_type,
+        "visibility": visibility,
+        "content": preview or f"File: {filename}\nStatus: UPLOADED. AI processing is running asynchronously.",
+        "folder_path": folder_path.strip() or suggestion.get("folder_path") or None,
+        "folder_node_id": folder_node_id or None,
+    }
+    payload["folder_path"] = payload["folder_path"] or suggest_folder(db, dict(user), payload)
+    return payload
 
 
 def current_user(authorization: str = Header(default="")) -> dict:
@@ -536,10 +575,7 @@ def dashboard(user: dict = Depends(current_user)):
                 for item in anonymize_documents(docs, user)
             ],
             "requests": requests,
-            "backups": [
-                backup_record_with_manifest(dict(item))
-                for item in db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()
-            ],
+            "backups": rows(db.execute("SELECT * FROM backup_logs ORDER BY created_at DESC LIMIT 10").fetchall()),
             "audit": rows(db.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 20").fetchall()) if user["role"] == "admin" else [],
         }
 
@@ -579,17 +615,22 @@ async def analyze_file(request: Request, x_filename: str = Header(), user: dict 
             "hãy nhập metadata thủ công để lưu file hoặc dùng xử lý nền.",
         )
     filename = unquote(x_filename)
-    content = extract_text(filename, request.headers.get("content-type", "application/octet-stream"), raw)
+    mime_type = request.headers.get("content-type", "application/octet-stream")
+    content = extract_text(filename, mime_type, raw)
     with connection() as db:
-        import json
-        prompt_row = db.execute("SELECT value FROM policies WHERE key='ai_prompts'").fetchone()
-        prompts = json.loads(prompt_row["value"]) if prompt_row else {}
-        metadata = guess_metadata(filename, content, prompts.get("metadata_instructions"))
+        payload = metadata_payload_for_upload(db, user, filename, mime_type, raw)
+        metadata = {
+            "title": payload["title"],
+            "topic": payload["topic"],
+            "doc_type": payload["doc_type"],
+            "summary": content[:300].strip(),
+            "visibility": payload["visibility"],
+        }
+        classification_ticket = build_classification_ticket_preview(db, filename, content[:5000], metadata)
         duplicate = db.execute("SELECT id,title FROM documents WHERE content_hash=?", (hash_secret(content.strip()),)).fetchone()
-        folder_path = suggest_folder(db, user, {**metadata, "visibility": "public"})
     return {
-        "metadata": metadata, "folder_path": folder_path, "duplicate": dict(duplicate) if duplicate else None,
-        "content_preview": content[:5000], "ai": ai_provider.status(),
+        "metadata": metadata, "folder_path": payload["folder_path"], "duplicate": dict(duplicate) if duplicate else None,
+        "content_preview": content[:5000], "classification_ticket": classification_ticket, "ai": ai_provider.status(),
     }
 
 
@@ -1044,23 +1085,15 @@ def upload_task_public(task) -> dict:
 
 def classification_ticket_public(ticket) -> dict:
     item = dict(ticket)
-    item["suggestions"] = json.loads(item["suggestions"])
+    if isinstance(item.get("suggestions"), str):
+        item["suggestions"] = json.loads(item["suggestions"])
     return item
 
 
-def create_classification_ticket(db, task, user: dict) -> dict:
-    existing = db.execute(
-        "SELECT * FROM document_classification_tickets WHERE upload_task_id=? ORDER BY created_at DESC LIMIT 1",
-        (task["id"],),
-    ).fetchone()
-    if existing and existing["status"] in {"PENDING_CONFIRMATION", "CONFIRMED"}:
-        return classification_ticket_public(existing)
-    raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
-    preview = quick_preview_text(task["filename"], task["mime_type"], raw)
-    metadata = json.loads(task["metadata"])
-    suggestions = active_course_suggestions(db, task["filename"], preview)
+def build_classification_ticket_preview(db, filename: str, preview: str, metadata: dict, *, ticket_id: str | None = None) -> dict:
+    suggestions = active_course_suggestions(db, filename, preview, metadata)
     top = suggestions[0] if suggestions else {}
-    text = f"{task['filename']} {preview}".casefold()
+    text = f"{filename} {preview}".casefold()
     suggested_type = metadata.get("doc_type") if metadata.get("doc_type") in DOCUMENT_TYPES else "Tài liệu khác"
     for candidate in DOCUMENT_TYPES:
         if candidate.casefold() in text or candidate.replace(" ", "_").casefold() in text:
@@ -1073,7 +1106,38 @@ def create_classification_ticket(db, task, user: dict) -> dict:
         if top else
         "AI đọc nhanh tên file và 1-2 trang đầu nhưng chưa tìm thấy học phần khớp đủ rõ trong Master Tree."
     )
-    ticket_id = f"ticket-{secrets.token_hex(8)}"
+    return {
+        "id": ticket_id or f"preview-{secrets.token_hex(8)}",
+        "filename": filename,
+        "suggested_specialization_id": top.get("specialization_id"),
+        "suggested_specialization": top.get("specialization"),
+        "suggested_course_id": top.get("course_id"),
+        "suggested_course": top.get("course"),
+        "suggested_document_type": suggested_type,
+        "suggested_visibility": metadata.get("visibility", "private"),
+        "confidence": confidence,
+        "reasoning": reasoning,
+        "suggestions": suggestions,
+        "selected_specialization_id": top.get("specialization_id"),
+        "selected_course_id": top.get("course_id"),
+        "selected_document_type": suggested_type,
+        "selected_visibility": metadata.get("visibility", "private"),
+        "status": "PENDING_CONFIRMATION",
+        "document_id": None,
+    }
+
+
+def create_classification_ticket(db, task, user: dict) -> dict:
+    existing = db.execute(
+        "SELECT * FROM document_classification_tickets WHERE upload_task_id=? ORDER BY created_at DESC LIMIT 1",
+        (task["id"],),
+    ).fetchone()
+    if existing and existing["status"] in {"PENDING_CONFIRMATION", "CONFIRMED"}:
+        return classification_ticket_public(existing)
+    raw = __import__("pathlib").Path(task["temp_path"]).read_bytes()
+    preview = quick_preview_text(task["filename"], task["mime_type"], raw)
+    metadata = json.loads(task["metadata"])
+    preview_ticket = build_classification_ticket_preview(db, task["filename"], preview, metadata, ticket_id=f"ticket-{secrets.token_hex(8)}")
     timestamp = now()
     db.execute(
         """INSERT INTO document_classification_tickets(
@@ -1083,19 +1147,23 @@ def create_classification_ticket(db, task, user: dict) -> dict:
            selected_visibility,status,document_id,created_at,updated_at)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'PENDING_CONFIRMATION', NULL, ?, ?)""",
         (
-            ticket_id, task["id"], user["code"], task["filename"], top.get("specialization_id"), top.get("specialization"),
-            top.get("course_id"), top.get("course"), suggested_type, metadata.get("visibility", "private"), confidence,
-            reasoning, json.dumps(suggestions, ensure_ascii=False), top.get("specialization_id"), top.get("course_id"),
-            suggested_type, metadata.get("visibility", "private"), timestamp, timestamp,
+            preview_ticket["id"], task["id"], user["code"], task["filename"],
+            preview_ticket.get("suggested_specialization_id"), preview_ticket.get("suggested_specialization"),
+            preview_ticket.get("suggested_course_id"), preview_ticket.get("suggested_course"),
+            preview_ticket.get("suggested_document_type"), preview_ticket.get("suggested_visibility"),
+            preview_ticket.get("confidence"), preview_ticket.get("reasoning"),
+            json.dumps(preview_ticket.get("suggestions") or [], ensure_ascii=False),
+            preview_ticket.get("selected_specialization_id"), preview_ticket.get("selected_course_id"),
+            preview_ticket.get("selected_document_type"), preview_ticket.get("selected_visibility"), timestamp, timestamp,
         ),
     )
-    ticket = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (ticket_id,)).fetchone())
+    ticket = classification_ticket_public(db.execute("SELECT * FROM document_classification_tickets WHERE id=?", (preview_ticket["id"],)).fetchone())
     task_metadata = {**metadata, "classification_ticket": ticket}
     db.execute(
         "UPDATE upload_tasks SET status='pending_confirmation',metadata=?,error=NULL,updated_at=? WHERE id=?",
         (json.dumps(task_metadata, ensure_ascii=False), timestamp, task["id"]),
     )
-    audit(db, user["code"], "upload.classification_ticket", "upload_task", task["id"], {"ticket_id": ticket_id, "confidence": confidence})
+    audit(db, user["code"], "upload.classification_ticket", "upload_task", task["id"], {"ticket_id": preview_ticket["id"], "confidence": preview_ticket["confidence"]})
     return ticket
 
 
@@ -1381,7 +1449,7 @@ def confirm_upload(task_id: str, payload: UploadConfirmInput, background_tasks: 
             specialization = db.execute("SELECT * FROM specializations WHERE folder_node_id=?", (spec_node["id"],)).fetchone() if spec_node else None
             final_specialization_id = specialization["id"] if specialization else final_specialization_id
         assignment = folder_assignment_from_metadata(db, final_specialization_id, final_course_id, final_document_type)
-        if (final_course_id or active_policy(db)) and not assignment["folder_node_id"]:
+        if final_course_id and not assignment["folder_node_id"]:
             raise HTTPException(400, "Hay chon hoc phan hop le de luu tai lieu vao thu muc loai tai lieu.")
         if not assignment["folder_node_id"] and payload.folder_path:
             assignment["folder_path"] = payload.folder_path
@@ -1485,9 +1553,9 @@ async def upload_document(
     request: Request,
     background_tasks: BackgroundTasks,
     x_filename: str = Header(),
-    x_title: str = Header(),
-    x_topic: str = Header(),
-    x_doc_type: str = Header(),
+    x_title: str = Header(default=""),
+    x_topic: str = Header(default=""),
+    x_doc_type: str = Header(default=""),
     x_visibility: Literal["public", "private"] = Header(),
     x_folder_path: str = Header(default=""),
     x_folder_node_id: str = Header(default=""),
@@ -1517,6 +1585,11 @@ async def upload_document(
     }
     try:
         with transaction() as db:
+            payload = metadata_payload_for_upload(
+                db, user, filename, mime_type, raw,
+                title=unquote(x_title), topic=unquote(x_topic), doc_type=unquote(x_doc_type),
+                visibility=x_visibility, folder_path=unquote(x_folder_path), folder_node_id=x_folder_node_id,
+            )
             suggestion = suggest_upload_destination(db, dict(user), filename, payload["content"])
             payload["folder_path"] = payload["folder_path"] or suggestion.get("folder_path") or suggest_folder(db, dict(user), payload)
             document = create_document(db, user, payload, defer_processing=True)
@@ -1541,9 +1614,9 @@ async def upload_new_version(
     request: Request,
     background_tasks: BackgroundTasks,
     x_filename: str = Header(),
-    x_title: str = Header(),
-    x_topic: str = Header(),
-    x_doc_type: str = Header(),
+    x_title: str = Header(default=""),
+    x_topic: str = Header(default=""),
+    x_doc_type: str = Header(default=""),
     x_visibility: Literal["public", "private"] = Header(),
     x_folder_path: str = Header(default=""),
     x_folder_node_id: str = Header(default=""),
@@ -1570,6 +1643,11 @@ async def upload_new_version(
     }
     try:
         with transaction() as db:
+            payload = metadata_payload_for_upload(
+                db, user, filename, mime_type, raw,
+                title=unquote(x_title), topic=unquote(x_topic), doc_type=unquote(x_doc_type),
+                visibility=x_visibility, folder_path=unquote(x_folder_path), folder_node_id=x_folder_node_id,
+            )
             suggestion = suggest_upload_destination(db, dict(user), filename, payload["content"])
             payload["folder_path"] = payload["folder_path"] or suggestion.get("folder_path") or suggest_folder(db, dict(user), payload)
             document = update_document(db, user, get_document(db, document_id), payload, defer_processing=True)
